@@ -1,0 +1,23 @@
+# LiteLLM translates + injects the provider API key, then presents a plain
+# OpenAI-compatible endpoint in-cluster. MaaS then treats it like any other
+# local model, so no Tech Preview CR fields are needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: ${MAAS_NS}
+data:
+  config.yaml: |
+    model_list:
+      - model_name: ${MODEL_NAME}
+        litellm_params:
+          model: openai/${PROVIDER_MODEL_ID}
+          api_base: ${PROVIDER_BASE_URL}
+          api_key: os.environ/PROVIDER_API_KEY
+    general_settings:
+      # LiteLLM itself needs no auth: MaaS/kube-auth-proxy is the auth layer,
+      # and the Service is ClusterIP-only.
+      master_key: null
+    litellm_settings:
+      drop_params: true
+      telemetry: false

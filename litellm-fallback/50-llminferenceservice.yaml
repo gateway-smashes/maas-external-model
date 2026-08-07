@@ -1,0 +1,28 @@
+# Registers the LiteLLM Service with MaaS as an ordinary OpenAI-compatible
+# backend. This uses only well-trodden fields -- no Tech Preview schema.
+#
+# VERIFY with ./scripts/00-discover.sh section E: copy the shape of an
+# LLMInferenceService that already works on your cluster if this differs.
+apiVersion: serving.kserve.io/v1alpha1
+kind: LLMInferenceService
+metadata:
+  name: ${MODEL_NAME}
+  namespace: ${MAAS_NS}
+  labels:
+    opendatahub.io/dashboard: "true"
+    opendatahub.io/maas: "true"
+  annotations:
+    openshift.io/display-name: "${MODEL_DISPLAY_NAME}"
+    openshift.io/description: "${MODEL_DESCRIPTION}"
+spec:
+  model:
+    name: ${MODEL_NAME}
+    uri: http://litellm.${MAAS_NS}.svc.cluster.local:8080/v1
+  replicas: 0
+  router:
+    gateway:
+      refs:
+        - name: ${GATEWAY_NAME}
+          namespace: ${GATEWAY_NS}
+    route: {}
+    scheduler: {}

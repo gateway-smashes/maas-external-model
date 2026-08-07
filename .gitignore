@@ -1,0 +1,16 @@
+# Real credentials -- never commit
+config.env
+
+# Discovery output can contain hostnames, tokens, cluster internals
+discover-output.txt
+*.log
+*.tmp
+
+# Rendered manifests (may contain substituted secrets)
+rendered/
+*.rendered.yaml
+
+# OS noise
+.DS_Store
+Thumbs.db
+.writetest
