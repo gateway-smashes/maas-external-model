@@ -1,0 +1,33 @@
+# Native external model for RHOAI 3.4+ (ExternalModel CRD from MaaS).
+# LLMInferenceService has no external/apiKey fields on this CRD — use ExternalModel.
+#
+# Secret must contain data key "api-key" and label inference.llm-d.ai/ipp-managed=true
+# (created by scripts/10-apply.sh).
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: ExternalModel
+metadata:
+  name: ${MODEL_NAME}
+  namespace: ${MAAS_NS}
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    openshift.io/display-name: "${MODEL_DISPLAY_NAME}"
+    openshift.io/description: "${MODEL_DESCRIPTION}"
+spec:
+  # openai | anthropic | azure-openai | vertex | bedrock-openai
+  provider: openai
+  # FQDN only — no scheme or path
+  endpoint: ${PROVIDER_HOST}
+  targetModel: ${PROVIDER_MODEL_ID}
+  credentialRef:
+    name: ${MODEL_NAME}-provider
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: ${MODEL_NAME}
+  namespace: ${MAAS_NS}
+spec:
+  modelRef:
+    kind: ExternalModel
+    name: ${MODEL_NAME}

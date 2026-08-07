@@ -1,9 +1,8 @@
-# Note: these manifests use ${VAR} placeholders resolved by envsubst in
-# scripts/10-apply.sh, so plain `kubectl apply -k` will NOT work directly.
-# Render first:  . ./config.env && envsubst < native/20-llminferenceservice.yaml
+# Manifests use ${VAR} placeholders resolved by envsubst in scripts/10-apply.sh.
+# Plain `kubectl apply -k` will NOT work directly.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - 00-namespace.yaml
-  - 20-llminferenceservice.yaml
-  - 30-tier-access-rbac.yaml
+  - 20-externalmodel.yaml
+  - 30-maas-access.yaml

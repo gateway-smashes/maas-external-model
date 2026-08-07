@@ -1,6 +1,6 @@
 # Real credentials -- never commit
 config.env
-
+config.env.bak
 # Discovery output can contain hostnames, tokens, cluster internals
 discover-output.txt
 *.log

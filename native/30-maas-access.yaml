@@ -1,0 +1,38 @@
+# Who can call the model (MaaSAuthPolicy) and token rate limits (MaaSSubscription).
+# Applied in models-as-a-service; subjects default to the cluster-admin user.
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: ${MODEL_NAME}-access
+  namespace: models-as-a-service
+spec:
+  modelRefs:
+    - name: ${MODEL_NAME}
+      namespace: ${MAAS_NS}
+  subjects:
+    users:
+      - admin
+    # Groups are objects with name (not bare strings). Widen so playground /
+    # authenticated users see and can call the model (not only cluster-admin).
+    groups:
+      - name: system:authenticated
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSSubscription
+metadata:
+  name: ${MODEL_NAME}-access
+  namespace: models-as-a-service
+spec:
+  owner:
+    users:
+      - admin
+    groups:
+      - name: system:authenticated
+  modelRefs:
+    - name: ${MODEL_NAME}
+      namespace: ${MAAS_NS}
+      billingRate:
+        perToken: "0"
+      tokenRateLimits:
+        - limit: 100000
+          window: 1h

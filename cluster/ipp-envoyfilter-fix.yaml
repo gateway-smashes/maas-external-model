@@ -1,0 +1,61 @@
+# RHOAI Tenant reconciler stamps EnvoyFilter/payload-processing with anchor:
+#   extensions.istio.io/wasmplugin/<ns>.kuadrant-<gateway>
+# but Kuadrant on this platform injects auth as envoy.filters.http.wasm via
+# EnvoyFilter (no WasmPlugin CR). The product filter then either fails to attach
+# IPP, or a "fix" that INSERT_AFTER wasm can land *between* dual wasm filters
+# and rewrite the path before Authorino — chat then 401s.
+#
+# Also: GATEWAY-context EnvoyFilters in openshift-ingress may apply to every
+# Gateway in the namespace despite targetRefs. Prefer INSERT_BEFORE router so
+# auth/ratelimit wasm always run first.
+#
+# Apply:
+#   oc apply -f cluster/ipp-envoyfilter-fix.yaml
+#   # Keep product filter from fighting us (Tenant may recreate patches):
+#   oc annotate envoyfilter payload-processing -n openshift-ingress opendatahub.io/managed=false --overwrite
+#   oc patch envoyfilter payload-processing -n openshift-ingress --type=json \
+#     -p='[{"op":"replace","path":"/spec/configPatches","value":[]}]'
+#   oc delete pod -n openshift-ingress -l gateway.networking.k8s.io/gateway-name=maas-default-gateway
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: payload-processing-attach-fix
+  namespace: openshift-ingress
+  labels:
+    app.kubernetes.io/name: payload-processing-fix
+    app.kubernetes.io/part-of: models-as-a-service
+  annotations:
+    opendatahub.io/managed: "false"
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: maas-default-gateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.ext_proc.bbr
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+            allow_mode_override: true
+            failure_mode_allow: false
+            grpc_service:
+              envoy_grpc:
+                cluster_name: outbound|9004||payload-processing.openshift-ingress.svc.cluster.local
+            processing_mode:
+              request_body_mode: FULL_DUPLEX_STREAMED
+              request_header_mode: SEND
+              request_trailer_mode: SEND
+              response_body_mode: FULL_DUPLEX_STREAMED
+              response_header_mode: SEND
+              response_trailer_mode: SEND

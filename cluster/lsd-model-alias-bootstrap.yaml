@@ -1,0 +1,64 @@
+# Short model-id alias for Gen AI playground (LlamaStack).
+# The UI calls model id "<MODEL_NAME>" but LSD registers
+# "maas-vllm-inference-1/<MODEL_NAME>". This ConfigMap is mounted by
+# cluster/lsd-playground-fix.sh as a postStart hook.
+#
+# Edit MODEL_NAME / PROVIDER_ID below if yours differ, then:
+#   ./cluster/lsd-playground-fix.sh
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lsd-model-alias-bootstrap
+  namespace: maas-external-models
+  labels:
+    app.kubernetes.io/part-of: genai-playground
+    app.kubernetes.io/name: lsd-model-alias-bootstrap
+data:
+  bootstrap-alias.py: |
+    import json, os, sqlite3, time, urllib.request
+
+    MODEL = os.environ.get("PLAYGROUND_MODEL_ID", "granite-3-2-8b-instruct-cpu")
+    PROVIDER = os.environ.get("PLAYGROUND_PROVIDER_ID", "maas-vllm-inference-1")
+    DB = "/opt/app-root/src/.llama/distributions/rh/kvstore.db"
+    SHORT_KEY = f"distributions:registry:v10::model:{MODEL}"
+    LONG_KEY = f"distributions:registry:v10::model:{PROVIDER}/{MODEL}"
+    VAL = {
+        "identifier": MODEL,
+        "provider_resource_id": MODEL,
+        "provider_id": PROVIDER,
+        "type": "model",
+        "owner": None,
+        "source": "via_register_api",
+        "metadata": {"display_name": MODEL},
+        "model_type": "llm",
+        "model_validation": None,
+    }
+
+    for _ in range(60):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:8321/v1/models", timeout=2)
+            break
+        except Exception:
+            time.sleep(2)
+    else:
+        raise SystemExit("LSD never became ready for alias bootstrap")
+
+    for _ in range(30):
+        try:
+            c = sqlite3.connect(DB)
+            row = c.execute("select 1 from kvstore where key=?", (LONG_KEY,)).fetchone()
+            c.close()
+            if row:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    c = sqlite3.connect(DB)
+    c.execute(
+        "insert or replace into kvstore(key,value,expiration) values (?,?,NULL)",
+        (SHORT_KEY, json.dumps(VAL)),
+    )
+    c.commit()
+    c.close()
+    print(f"registered short model alias {MODEL}")
