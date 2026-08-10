@@ -1,0 +1,48 @@
+# Rendered by scripts/05-gateway.sh (envsubst).
+# Creates GatewayClass (cluster-scoped) + Gateway in ${GATEWAY_NS}.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ${GATEWAY_CLASS}
+  labels:
+    app.kubernetes.io/name: maas-gateway
+    app.kubernetes.io/part-of: models-as-a-service
+  annotations:
+    opendatahub.io/managed: "false"
+spec:
+  controllerName: openshift.io/gateway-controller/v1
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ${GATEWAY_NAME}
+  namespace: ${GATEWAY_NS}
+  labels:
+    app.kubernetes.io/name: maas
+    app.kubernetes.io/instance: ${GATEWAY_NAME}
+    app.kubernetes.io/part-of: models-as-a-service
+    opendatahub.io/managed: "false"
+  annotations:
+    opendatahub.io/managed: "false"
+    security.opendatahub.io/authorino-tls-bootstrap: "true"
+spec:
+  gatewayClassName: ${GATEWAY_CLASS}
+  listeners:
+    - name: https
+      hostname: ${GATEWAY_HOSTNAME}
+      port: 443
+      protocol: HTTPS
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: ${GATEWAY_CERT_SECRET}
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ${GATEWAY_ALLOWED_NAMESPACES_JSON}

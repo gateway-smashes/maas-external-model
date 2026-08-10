@@ -43,8 +43,17 @@ oc get pods -n "$APP_NS" -l app.kubernetes.io/name=maas-api 2>/dev/null
 oc get configmap tier-to-group-mapping -n "$APP_NS" -o yaml 2>/dev/null
 oc get subscriptions -A 2>/dev/null | grep -Ei 'connectivity|kuadrant|authorino'
 
-h "H. Gateway is actually programmed (must be, or nothing routes)"
-oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}' 2>/dev/null
+h "H. Gateways (all) + configured GATEWAY_NS/GATEWAY_NAME"
+echo "config.env target: ${GATEWAY_NS:-?}/${GATEWAY_NAME:-?}"
+oc get gateway -A -o wide 2>/dev/null
+echo "--- configured gateway status ---"
+oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}{"\n"}{end}' 2>/dev/null \
+  || echo "(missing $GATEWAY_NS/$GATEWAY_NAME — run ./scripts/05-gateway.sh install)"
+echo "--- listener hostname ---"
+oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{.spec.listeners[*].hostname}{"\n"}' 2>/dev/null || true
+echo "--- Tenant gatewayRef ---"
+oc get tenant -n "${TENANT_NS:-models-as-a-service}" -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{.spec.gatewayRef.namespace}{"/"}{.spec.gatewayRef.name}{" phase="}{.status.phase}{"\n"}{end}' 2>/dev/null || true
+echo "--- GatewayConfig (dashboard / data-science gateway; not MaaS) ---"
 oc get gatewayconfig default-gateway -o jsonpath='{.spec}{"\n"}' 2>/dev/null
 
 h "I. Egress reachability to your provider from inside the cluster"

@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${GATEWAY_NS}
+  labels:
+    app.kubernetes.io/name: maas-gateway
+    app.kubernetes.io/part-of: models-as-a-service
+    opendatahub.io/dashboard: "false"
+  annotations:
+    openshift.io/display-name: "MaaS Gateway"
+    opendatahub.io/managed: "false"

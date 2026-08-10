@@ -34,7 +34,7 @@ ordered checkbox list you can reproduce by hand.
 flowchart LR
   Client["Client / Dashboard / Playground<br/>Bearer sk-oai-…"]
   LB["maas.apps.&lt;domain&gt;"]
-  GW["Gateway<br/>maas-default-gateway"]
+  GW["Gateway<br/>$GATEWAY_NS / maas-default-gateway"]
   Wasm["Kuadrant Wasm<br/>AuthPolicy + RateLimit"]
   Authorino["Authorino<br/>TokenReview / API key"]
   IPP["IPP ext_proc<br/>path rewrite + API key inject"]
@@ -244,102 +244,58 @@ For production use RDS / Crunchy / Azure Database. Upstream helper:
 `NAMESPACE=redhat-ods-applications ./scripts/setup-database.sh` from
 [opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/models-as-a-service).
 
-### 3.6 Prefer a real `maas-default-gateway` (UI discovery)
+### 3.6 MaaS Gateway in a dedicated namespace (recommended)
 
-`maas-ui` auto-discovers `https://maas.apps.<cluster-domain>/maas-api`. If that
-hostname does not exist (only `inference-gateway.apps...`), the catalog UI stays
-empty even when curl against the inference gateway works.
-
-**Preferred:** create Gateway `maas-default-gateway` in `openshift-ingress` with
-hostname `maas.apps.<domain>`, GatewayClass `openshift-default`, and a valid TLS
-secret; leave Tenant `gatewayRef` on that gateway (the product default).
+`maas-ui` auto-discovers `https://maas.<cluster-domain>/maas-api`. Put a real
+Gateway behind that hostname. **Prefer a dedicated namespace** (`GATEWAY_NS`,
+default `maas-gateway`) so you are not sharing `openshift-ingress` with other
+gateways.
 
 ```bash
-# Example shape — adjust cert secret / allowedRoutes namespaces for your cluster
-oc apply -f - <<'EOF'
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: maas-default-gateway
-  namespace: openshift-ingress
-  labels:
-    app.kubernetes.io/name: maas
-    opendatahub.io/managed: "false"
-  annotations:
-    opendatahub.io/managed: "false"
-    security.opendatahub.io/authorino-tls-bootstrap: "true"
-spec:
-  gatewayClassName: openshift-default
-  listeners:
-  - name: https
-    hostname: maas.apps.REPLACE_ME
-    port: 443
-    protocol: HTTPS
-    tls:
-      mode: Terminate
-      certificateRefs:
-      - kind: Secret
-        name: cert-manager-ingress-cert
-    allowedRoutes:
-      namespaces:
-        from: Selector
-        selector:
-          matchExpressions:
-          - key: kubernetes.io/metadata.name
-            operator: In
-            values: [openshift-ingress, redhat-ods-applications, maas-external-models, models-as-a-service]
-EOF
+# config.env
+export GATEWAY_NS="maas-gateway"
+export GATEWAY_NAME="maas-default-gateway"
+export GATEWAY_HOSTNAME=""                 # empty => maas.<cluster-domain>
+export GATEWAY_CERT_SECRET="maas-gateway-tls"
+export IPP_NS="$GATEWAY_NS"
 
-oc patch tenant.maas.opendatahub.io default-tenant -n models-as-a-service --type=merge -p '{
-  "spec": {
-    "gatewayRef": {
-      "name": "maas-default-gateway",
-      "namespace": "openshift-ingress"
-    }
-  }
-}'
+# Tear down an old gateway (optional), then install
+./scripts/05-gateway.sh delete
+./scripts/05-gateway.sh install
+./scripts/05-gateway.sh status
 
-curl -sk "https://maas.apps.REPLACE_ME/maas-api/health"   # expect 200
+curl -sk "https://$(oc get gateway $GATEWAY_NAME -n $GATEWAY_NS \
+  -o jsonpath='{.spec.listeners[0].hostname}')/maas-api/health"
 ```
 
-**Fallback:** if you must reuse `openshift-ai-inference`, patch Tenant
-`gatewayRef` to that gateway and set `GATEWAY_NAME` in `config.env` — knowing
-the dashboard may not discover MaaS until `maas.apps` exists.
+What `05-gateway.sh install` does:
 
-Also set `GATEWAY_NAME=maas-default-gateway` / `GATEWAY_NS=openshift-ingress` in
-`config.env`.
+1. Creates Namespace `$GATEWAY_NS`
+2. Ensures TLS Secret `$GATEWAY_CERT_SECRET` in that NS (copies from
+   `openshift-ingress` when possible)
+3. Applies GatewayClass + Gateway (`cluster/10-maas-default-gateway.yaml`)
+4. Patches Tenant `gatewayRef` → `$GATEWAY_NS/$GATEWAY_NAME`
+5. Applies IPP EnvoyFilter fix into `$GATEWAY_NS` (§3.7)
+
+**Do not** use the dashboard / data-science gateway (`openshift-ai.*`) as the
+MaaS gateway. Keep that separate.
 
 ### 3.7 IPP EnvoyFilter attach (auth before path rewrite)
 
-The Tenant reconciler stamps `EnvoyFilter/payload-processing` with anchor:
-
-```text
-extensions.istio.io/wasmplugin/openshift-ingress.kuadrant-maas-default-gateway
-```
-
-Kuadrant on OpenShift often injects auth as `envoy.filters.http.wasm` via
-EnvoyFilter (no WasmPlugin CR), so the product IPP filter never attaches
-correctly. A naive `INSERT_AFTER wasm` fix can also land **between** dual wasm
-filters and rewrite the path to `/v1/chat/completions` *before* Authorino —
-Kuadrant only matches `/maas-external-models/<model>/...` → chat **401**.
-
-Use this repo’s fix: `INSERT_BEFORE router`, and clear the product filter’s
-broken patches:
+The Tenant reconciler stamps `EnvoyFilter/payload-processing` (in `$IPP_NS`,
+usually the same as `$GATEWAY_NS`) with a WasmPlugin anchor that often does not
+exist. Kuadrant injects `envoy.filters.http.wasm` instead. A bad attach order
+rewrites the path to `/v1/chat/completions` *before* Authorino → chat **401**.
 
 ```bash
-oc apply -f cluster/ipp-envoyfilter-fix.yaml
-oc annotate envoyfilter payload-processing -n openshift-ingress \
-  opendatahub.io/managed=false --overwrite
-oc patch envoyfilter payload-processing -n openshift-ingress --type=json \
-  -p='[{"op":"replace","path":"/spec/configPatches","value":[]}]'
-oc delete pod -n openshift-ingress \
-  -l gateway.networking.k8s.io/gateway-name=maas-default-gateway
+./scripts/05-gateway.sh ipp
+# equivalent: envsubst < cluster/ipp-envoyfilter-fix.yaml | oc apply -f -
 
-# Confirm: all wasm filters, then ext_proc.bbr, then router
-GW_POD=$(oc get pods -n openshift-ingress \
-  -l gateway.networking.k8s.io/gateway-name=maas-default-gateway \
+# Confirm filter chain on the gateway pod:
+GW_POD=$(oc get pods -n "$GATEWAY_NS" \
+  -l gateway.networking.k8s.io/gateway-name="$GATEWAY_NAME" \
   -o jsonpath='{.items[0].metadata.name}')
-oc exec -n openshift-ingress "$GW_POD" -c istio-proxy -- \
+oc exec -n "$GATEWAY_NS" "$GW_POD" -c istio-proxy -- \
   pilot-agent request GET config_dump \
   | python3 -c '
 import sys,json
@@ -363,10 +319,6 @@ envoy.filters.http.wasm          # sometimes duplicated
 envoy.filters.http.ext_proc.bbr
 envoy.filters.http.router
 ```
-
-> Note: GATEWAY-context EnvoyFilters in `openshift-ingress` may apply to every
-> Gateway in that namespace despite `targetRefs`. That is why `INSERT_BEFORE
-> router` is safer than `INSERT_AFTER wasm`.
 ### 3.8 Dashboard feature flags
 
 ```bash
@@ -443,7 +395,7 @@ oc patch maassubscription <name> -n models-as-a-service --type=merge -p '{
 ```bash
 cp config.env.example config.env
 # Edit: PROVIDER_BASE_URL (…/v1), PROVIDER_MODEL_ID, PROVIDER_API_KEY
-# GATEWAY_NAME must match the Tenant gatewayRef (prefer maas-default-gateway)
+# GATEWAY_NS / GATEWAY_NAME must match Tenant gatewayRef (./scripts/05-gateway.sh install)
 ```
 
 **Hard rules for `config.env`:**
@@ -508,8 +460,9 @@ some `/v1/models` paths).
 
 ```bash
 export TOKEN=$(oc whoami -t)
-export CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
-export GW_HOST=maas.${CLUSTER_DOMAIN}   # NOT inference-gateway / rh-ai
+. ./config.env
+export GW_HOST=$(oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" \
+  -o jsonpath='{.spec.listeners[0].hostname}')
 
 export MAAS_KEY=$(curl -sk -X POST "https://$GW_HOST/maas-api/v1/api-keys" \
   -H "Authorization: Bearer $TOKEN" \
@@ -732,7 +685,7 @@ oc logs -n redhat-ods-applications deploy/maas-controller --tail=100 \
 | **Fix** | `10-apply.sh` patches this; or manually add the namespace to the gateway listener selector. |
 
 ```bash
-oc get gateway maas-default-gateway -n openshift-ingress \
+oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" \
   -o jsonpath='{.spec.listeners[0].allowedRoutes}' | jq .
 ```
 
@@ -809,10 +762,10 @@ oc label secret ${MODEL_NAME}-provider -n ${MAAS_NS} \
   inference.llm-d.ai/ipp-managed=true \
   inference.networking.k8s.io/bbr-managed=true --overwrite
 
-oc rollout restart deploy/payload-processing -n openshift-ingress
+oc rollout restart deploy/payload-processing -n "${IPP_NS:-$GATEWAY_NS}"
 
 # Confirm reconciler saw the secret:
-oc logs -n openshift-ingress deploy/payload-processing --tail=50 \
+oc logs -n "${IPP_NS:-$GATEWAY_NS}" deploy/payload-processing --tail=50 \
   | grep -i 'Reconciling Secret'
 ```
 
@@ -858,7 +811,7 @@ oc logs -n openshift-ingress deploy/payload-processing --tail=50 \
 | | |
 |---|---|
 | **Cause** | GatewayClass / Istio / cert issues. |
-| **Fix** | `oc describe gateway -n openshift-ingress`; check istiod logs; confirm TLS secret exists. |
+| **Fix** | `oc describe gateway -n $GATEWAY_NS $GATEWAY_NAME`; confirm TLS secret in `$GATEWAY_NS`. |
 
 #### `SSL_ERROR_SYSCALL` / intermittent TLS from laptop
 
@@ -973,9 +926,10 @@ oc get maasauthpolicy,maassubscription -n models-as-a-service
 oc get secret ${MODEL_NAME}-provider -n ${MAAS_NS} --show-labels
 
 # --- IPP ---
-oc logs -n openshift-ingress deploy/payload-processing --tail=80 \
+oc logs -n "${IPP_NS:-$GATEWAY_NS}" deploy/payload-processing --tail=80 \
   | grep -iE 'Executing request plugin|credentials|Reconciling Secret|error'
-oc get envoyfilter -n openshift-ingress | grep payload
+oc get envoyfilter -n "$GATEWAY_NS" | grep payload
+./scripts/05-gateway.sh status
 
 # --- Auth path ---
 oc get authpolicy -A
@@ -1020,8 +974,8 @@ flowchart TD
 | **Tenant** | MaaS platform CR that deploys maas-api / IPP / gateway policies for a gateway |
 | **sk-oai-*** | MaaS-issued API key prefix used for inference auth |
 | **LSD** | `LlamaStackDistribution` — Gen AI playground backend that proxies to MaaS |
-| **maas-default-gateway** | Preferred Gateway (`maas.apps.<domain>`) for UI discovery + model routes |
-
+| **maas-default-gateway** | Preferred Gateway name; lives in `$GATEWAY_NS` (default `maas-gateway`) |
+| **GATEWAY_NS** | Namespace for the MaaS Gateway + IPP EnvoyFilters (not the dashboard gateway) |
 ---
 
 ## 9. Full manual reproduction checklist
@@ -1034,26 +988,17 @@ Replace `REPLACE_ME` / placeholders with your values.
 - [ ] RH Connectivity Link + `Kuadrant` (Authorino TLS on)
 - [ ] DSC `kserve.modelsAsService.managementState: Managed`
 - [ ] Postgres + Secret `maas-db-config` (`DB_CONNECTION_URL`) in `redhat-ods-applications`
-- [ ] GatewayClass `openshift-default` if missing
-- [ ] Gateway `maas-default-gateway` hostname `maas.apps.<domain>`, TLS secret, `allowedRoutes` includes model + apps namespaces (§3.6)
-- [ ] Tenant `gatewayRef` → `openshift-ingress/maas-default-gateway`
-- [ ] `curl -sk https://maas.apps.<domain>/maas-api/health` → 200
-- [ ] IPP fix (§3.7):
-  ```bash
-  oc apply -f cluster/ipp-envoyfilter-fix.yaml
-  oc annotate envoyfilter payload-processing -n openshift-ingress opendatahub.io/managed=false --overwrite
-  oc patch envoyfilter payload-processing -n openshift-ingress --type=json \
-    -p='[{"op":"replace","path":"/spec/configPatches","value":[]}]'
-  oc delete pod -n openshift-ingress -l gateway.networking.k8s.io/gateway-name=maas-default-gateway
-  ```
+- [ ] `cp config.env.example config.env` — set `GATEWAY_NS=maas-gateway` (or your NS), provider `/v1`, key with **no** inline `#`
+- [ ] `./scripts/00-discover.sh`
+- [ ] Optional: delete old gateways → `./scripts/05-gateway.sh delete` (per old `GATEWAY_NS`)
+- [ ] `./scripts/05-gateway.sh install` (§3.6) — NS + Gateway + Tenant `gatewayRef` + IPP
+- [ ] `./scripts/05-gateway.sh status` — Programmed=True; health 200
 - [ ] Filter chain: `wasm` → (`wasm`) → `ext_proc.bbr` → `router` (IPP **after** auth)
 - [ ] Dashboard flags: `genAiStudio: true`, `modelAsService: true`
-- [ ] `maas-ui` log: discovered `https://maas.apps.<domain>/maas-api`
+- [ ] `maas-ui` log: discovered `https://maas.<domain>/maas-api` (matches Gateway hostname)
 
 ### B. Register model
 
-- [ ] `cp config.env.example config.env` — `GATEWAY_NAME=maas-default-gateway`, provider `/v1`, key with **no** inline `#`
-- [ ] `./scripts/00-discover.sh`
 - [ ] `./scripts/10-apply.sh native`
 - [ ] Secret labels `ipp-managed` + `bbr-managed`, data key `api-key`
 - [ ] `MaaSAuthPolicy` / `MaaSSubscription` include `groups: [{name: system:authenticated}]` (§3.10)
@@ -1062,16 +1007,16 @@ Replace `REPLACE_ME` / placeholders with your values.
 ### C. Curl verify
 
 ```bash
-export CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
-export GW=maas.$CLUSTER_DOMAIN
+. ./config.env
+export GW=$(oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{.spec.listeners[0].hostname}')
 export TOKEN=$(oc whoami -t)
 export MAAS_KEY=$(curl -sk -X POST "https://$GW/maas-api/v1/api-keys" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"verify","subscription":"<SUBSCRIPTION>"}' | jq -r .key)
+  -d '{"name":"verify","subscription":"'"$MODEL_NAME"'-access"}' | jq -r .key)
 curl -sk "https://$GW/v1/models" -H "Authorization: Bearer $MAAS_KEY" | jq
-curl -sk "https://$GW/<MAAS_NS>/<MODEL>/v1/chat/completions" \
+curl -sk "https://$GW/$MAAS_NS/$MODEL_NAME/v1/chat/completions" \
   -H "Authorization: Bearer $MAAS_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"<MODEL>","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' | jq
+  -d '{"model":"'"$MODEL_NAME"'","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' | jq
 ```
 
 - [ ] `/v1/models` lists model Ready
@@ -1097,15 +1042,16 @@ curl -sk "https://$GW/<MAAS_NS>/<MODEL>/v1/chat/completions" \
 
 | Resource | Who overwrites | Mitigation |
 |---|---|---|
-| `EnvoyFilter/payload-processing` | Tenant / maas-controller | Separate `payload-processing-attach-fix`; clear product patches; `opendatahub.io/managed=false` |
+| `EnvoyFilter/payload-processing` | Tenant / maas-controller | `./scripts/05-gateway.sh ipp` (attach-fix + clear product patches) |
 | LSD Deployment env / lifecycle | LlamaStack operator | Re-run `cluster/lsd-playground-fix.sh` |
 | `oc set env` on `rhods-dashboard` | Dashboard operator | Prefer Gateway hostname over `MAAS_API_URL` |
+| Old gateways in `openshift-ingress` | You (manual) | `GATEWAY_NS=openshift-ingress ./scripts/05-gateway.sh delete` then install into `maas-gateway` |
 
 ---
 
 ## References
 
-- This repo: [README.md](./README.md), [cluster/ipp-envoyfilter-fix.yaml](./cluster/ipp-envoyfilter-fix.yaml), [cluster/lsd-playground-fix.sh](./cluster/lsd-playground-fix.sh), [cluster/lsd-model-alias-bootstrap.yaml](./cluster/lsd-model-alias-bootstrap.yaml)
+- This repo: [README.md](./README.md), [scripts/05-gateway.sh](./scripts/05-gateway.sh), [cluster/ipp-envoyfilter-fix.yaml](./cluster/ipp-envoyfilter-fix.yaml), [cluster/lsd-playground-fix.sh](./cluster/lsd-playground-fix.sh), [cluster/lsd-model-alias-bootstrap.yaml](./cluster/lsd-model-alias-bootstrap.yaml)
 - [ODH External Model Setup](https://github.com/opendatahub-io/models-as-a-service/blob/main/docs/content/install/external-model-setup.md)
 - [ODH MaaS install](https://github.com/opendatahub-io/models-as-a-service/blob/main/docs/content/install/maas-setup.md)
 - [RHOAI MaaS docs (3.3)](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.3/html/govern_llm_access_with_models-as-a-service/deploy-and-manage-models-as-a-service_maas)

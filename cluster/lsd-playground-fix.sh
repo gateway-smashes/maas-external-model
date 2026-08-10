@@ -29,8 +29,14 @@ MAX_TOKENS="${PLAYGROUND_MAX_TOKENS:-512}"
 PROVIDER_ID="${PLAYGROUND_PROVIDER_ID:-maas-vllm-inference-1}"
 
 if [[ -z "${GATEWAY_HOST}" ]]; then
-  CLUSTER_DOMAIN="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')"
-  GATEWAY_HOST="maas.${CLUSTER_DOMAIN}"
+  if [[ -n "${GATEWAY_NAME:-}" && -n "${GATEWAY_NS:-}" ]]; then
+    GATEWAY_HOST="$(oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" \
+      -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
+  fi
+  if [[ -z "${GATEWAY_HOST}" ]]; then
+    CLUSTER_DOMAIN="$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
+    GATEWAY_HOST="maas.${CLUSTER_DOMAIN}"
+  fi
 fi
 
 echo "==> Gateway host: ${GATEWAY_HOST}"

@@ -35,6 +35,11 @@ cat <<SNIP
 
 SNIP
 
-h "5. IPP attachment (ext_proc must be in the gateway filter chain)"
+h "5. Gateway + Tenant"
+echo "gateway: $GATEWAY_NS/$GATEWAY_NAME"
+oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}' 2>/dev/null || echo "MISSING gateway — ./scripts/05-gateway.sh install"
+oc get tenant -n "${TENANT_NS:-models-as-a-service}" -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{.spec.gatewayRef.namespace}{"/"}{.spec.gatewayRef.name}{"\n"}{end}' 2>/dev/null
+
+h "6. IPP attachment (ext_proc must be in the gateway filter chain)"
 oc get envoyfilter payload-processing-attach-fix -n "$GATEWAY_NS" -o name 2>/dev/null \
-  || echo "  MISSING: apply cluster/ipp-envoyfilter-fix.yaml if path-based chat returns 404/500"
+  || echo "  MISSING: ./scripts/05-gateway.sh ipp"

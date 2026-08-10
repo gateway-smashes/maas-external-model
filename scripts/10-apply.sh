@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 . ./config.env
 MODE="${1:-native}"
 
+: "${GATEWAY_NS:?set GATEWAY_NS in config.env}"
+: "${GATEWAY_NAME:?set GATEWAY_NAME in config.env}"
+
 # ExternalModel.spec.endpoint is FQDN only (no scheme/path).
 if [ -z "${PROVIDER_HOST:-}" ]; then
   PROVIDER_HOST=$(printf '%s' "$PROVIDER_BASE_URL" | sed -E 's|^https?://||; s|/.*||')
@@ -33,6 +36,9 @@ if oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" >/dev/null 2>&1; then
             else . end)' \
       | oc apply -f -
   fi
+else
+  echo "WARNING: gateway $GATEWAY_NS/$GATEWAY_NAME not found."
+  echo "         Install it first:  ./scripts/05-gateway.sh install"
 fi
 
 echo ">> provider credential secret (key: api-key, IPP-managed label required)"
@@ -73,6 +79,7 @@ case "$MODE" in
 esac
 
 echo
-echo "Applied. Now run: ./scripts/20-verify.sh"
+echo "Applied (gateway $GATEWAY_NS/$GATEWAY_NAME)."
+echo "Now run: ./scripts/20-verify.sh"
 echo "Mint a key:  POST https://<gateway>/maas-api/v1/api-keys  {\"name\":\"test\",\"subscription\":\"${MODEL_NAME}-access\"}"
 echo "Chat:        POST https://<gateway>/${MAAS_NS}/${MODEL_NAME}/v1/chat/completions"
