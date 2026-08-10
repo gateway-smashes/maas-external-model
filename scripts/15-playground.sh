@@ -65,20 +65,32 @@ else
   elif [ -n "$EX_IMG" ]; then
     LSD_DIST_KEY="image"; LSD_DIST_VALUE="$EX_IMG"; SRC="existing LlamaStackDistribution"
   else
-    # the operator publishes a distribution -> image map in a ConfigMap
+    # The operator publishes a distribution -> image map in a ConfigMap. Match
+    # ONLY llama-named ConfigMaps: the RHOAI namespace is full of unrelated
+    # *-image-parameters maps (kf-notebook-controller etc), and picking the
+    # "first key" of one of those silently produces a nonsense distribution.
     OP_NS="$(oc get deploy -A -o jsonpath='{range .items[?(@.metadata.name=="llama-stack-k8s-operator-controller-manager")]}{.metadata.namespace}{end}' 2>/dev/null || true)"
+    CANDS=""
     if [ -n "$OP_NS" ]; then
-      for cm in $(oc get cm -n "$OP_NS" -o name 2>/dev/null | grep -iE 'distribution|image' || true); do
-        CAND="$(oc get "$cm" -n "$OP_NS" -o jsonpath='{.data}' 2>/dev/null || true)"
-        [ -n "$CAND" ] || continue
-        echo "==> distribution map in $OP_NS/$(basename "$cm"):"
-        oc get "$cm" -n "$OP_NS" -o jsonpath='{range .data.*}{@}{"\n"}{end}' 2>/dev/null | head -20
-        FIRST_KEY="$(oc get "$cm" -n "$OP_NS" -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null | head -1)"
-        if [ -n "$FIRST_KEY" ]; then
-          LSD_DIST_KEY="name"; LSD_DIST_VALUE="$FIRST_KEY"; SRC="$OP_NS/$(basename "$cm") (first key)"
-          break
-        fi
+      for cm in $(oc get cm -n "$OP_NS" -o name 2>/dev/null | grep -i 'llama' || true); do
+        KEYS="$(oc get "$cm" -n "$OP_NS" -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null || true)"
+        [ -n "$KEYS" ] || continue
+        echo "==> candidate map $OP_NS/$(basename "$cm"):"
+        printf '      %s\n' $KEYS
+        CANDS="$CANDS $KEYS"
       done
+    fi
+    # Accept automatically only when there is exactly one candidate.
+    NCAND="$(printf '%s' "$CANDS" | tr ' ' '\n' | grep -c . || true)"
+    if [ "${NCAND:-0}" = "1" ]; then
+      LSD_DIST_KEY="name"; LSD_DIST_VALUE="$(printf '%s' "$CANDS" | tr -d ' ')"
+      SRC="$OP_NS llama ConfigMap (only candidate)"
+    elif [ "${NCAND:-0}" -gt 1 ]; then
+      echo
+      echo "ERROR: multiple distributions available — pick one explicitly rather than"
+      echo "       letting this script choose:"
+      printf '         LSD_DISTRIBUTION_NAME=%s ./scripts/15-playground.sh\n' $CANDS
+      exit 1
     fi
   fi
 fi
@@ -108,14 +120,36 @@ echo "==> distribution: ${LSD_DIST_KEY}=${LSD_DIST_VALUE}   (source: ${SRC})"
 # --- 2. mint a MaaS API key for the LSD ------------------------------------
 echo "==> minting MaaS API key for subscription ${SUBSCRIPTION}"
 TOKEN="$(oc whoami -t)"
-KEY="$(curl -sk -X POST "https://${GATEWAY_HOSTNAME}/maas-api/v1/api-keys" \
+MINT_URL="https://${GATEWAY_HOSTNAME}/maas-api/v1/api-keys"
+# Keep status and body so a failure says WHY instead of "could not mint".
+RESP="$(curl -sk -m 30 -w '\n__HTTP__%{http_code}' -X POST "$MINT_URL" \
   -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-  -d "{\"name\":\"playground-lsd-$(date +%s)\",\"subscription\":\"${SUBSCRIPTION}\"}" \
-  | { command -v jq >/dev/null && jq -r '.key // empty' || sed -n 's/.*"key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'; })"
+  -d "{\"name\":\"playground-lsd-$(date +%s)\",\"subscription\":\"${SUBSCRIPTION}\"}" 2>&1 || true)"
+HTTP="${RESP##*__HTTP__}"
+BODY="${RESP%$'\n'__HTTP__*}"
+KEY="$(printf '%s' "$BODY" | { command -v jq >/dev/null && jq -r '.key // empty' 2>/dev/null || sed -n 's/.*"key"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'; })"
+
 if [ -z "$KEY" ] || [ "$KEY" = "null" ]; then
   echo "ERROR: could not mint an API key."
-  echo "       Check the subscription exists:  oc get maassubscriptions.maas.opendatahub.io -A"
-  echo "       and that maas-api answers:      curl -sk https://${GATEWAY_HOSTNAME}/maas-api/health"
+  echo "    POST $MINT_URL"
+  echo "    HTTP ${HTTP:-<no response>}"
+  echo "    body: $(printf '%s' "$BODY" | head -c 400)"
+  echo
+  case "$HTTP" in
+    404|503|000|"")
+      echo "  maas-api is not reachable through this gateway. That is the Tenant"
+      echo "  binding, not the playground. Run this first:"
+      echo "      ./scripts/07-tenant.sh"
+      echo "      curl -sk https://${GATEWAY_HOSTNAME}/maas-api/health" ;;
+    401|403)
+      echo "  Authentication rejected. 'oc whoami -t' may be expired, or the"
+      echo "  MaaSAuthPolicy does not cover your user/group." ;;
+    *)
+      echo "  Subscriptions on this cluster:"
+      oc get maassubscriptions.maas.opendatahub.io -A 2>/dev/null | sed 's/^/      /' ;;
+  esac
+  echo
+  echo "  Note: a subscription in phase Failed cannot mint keys even though it exists."
   exit 1
 fi
 echo "    key prefix ${KEY:0:10}…"
