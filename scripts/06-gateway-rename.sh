@@ -1,25 +1,28 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 06-gateway-rename.sh — move the MaaS Gateway to a new name in the same
-# namespace, keeping the hostname and TLS secret.
+# 06-gateway-rename.sh — move the MaaS Gateway to a new name and/or namespace,
+# keeping the hostname and TLS secret.
 # =============================================================================
-# Why: the MaaS controller parents HTTPRoutes at a Gateway called
-# "maas-default-gateway". If your Gateway has any other name, MaaSModelRefs fail
-# with "does not reference gateway .../maas-default-gateway".
+# Why: maas-controller runs with --gateway-name/--gateway-namespace, fed from an
+# operator-owned ConfigMap. Editing that ConfigMap or the Deployment is reverted
+# by rhods-operator, so the Gateway has to move to where the controller looks,
+# not the other way round. MaaSModelRefs otherwise fail with
+# "does not reference gateway <ns>/<name>".
 #
 # A Route host can only be claimed once, so this is delete-then-create, not
 # create-then-switch. Expect a short outage on that hostname.
 #
 # config.env must already describe the DESIRED end state:
-#   GATEWAY_NS        namespace to keep the gateway in
-#   GATEWAY_NAME      new name (usually maas-default-gateway)
+#   GATEWAY_NS        destination namespace (may be openshift-ingress)
+#   GATEWAY_NAME      destination name (usually maas-default-gateway)
 #   GATEWAY_HOSTNAME  hostname to keep (reused, so no DNS change)
 #   GATEWAY_CERT_SECRET, GATEWAY_CLASS, ROUTE_LABELS
+# On a namespace move the TLS secret is copied into the destination namespace.
 #
 # Usage:
 #   . ./config.env
-#   ./scripts/06-gateway-rename.sh <old-gateway-name>
-#   ./scripts/06-gateway-rename.sh data-science-gateway --yes
+#   ./scripts/06-gateway-rename.sh <old-name>              # same namespace
+#   ./scripts/06-gateway-rename.sh maas-gateway/data-science-gateway --yes
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -35,7 +38,7 @@ for a in "$@"; do
   esac
 done
 [ -n "$OLD" ] && [ "${OLD#-}" = "$OLD" ] || {
-  echo "Usage: $0 <old-gateway-name> [--yes]"; exit 2; }
+  echo "Usage: $0 <old-gateway-name> | <old-ns>/<old-gateway-name> [--yes]"; exit 2; }
 
 GW_RES="gateways.gateway.networking.k8s.io"
 : "${GATEWAY_NS:?set GATEWAY_NS in config.env}"
@@ -43,30 +46,56 @@ GW_RES="gateways.gateway.networking.k8s.io"
 APP_NS="${APP_NS:-redhat-ods-applications}"
 GATEWAY_CERT_SECRET="${GATEWAY_CERT_SECRET:-maas-gateway-tls}"
 
+# Accept "name" (same namespace) or "ns/name" so the gateway can also be MOVED
+# to another namespace — the controller's --gateway-namespace is operator-owned
+# and cannot be pointed at an arbitrary namespace on some builds.
+case "$OLD" in
+  */*) OLD_NS="${OLD%%/*}"; OLD="${OLD##*/}" ;;
+  *)   OLD_NS="$GATEWAY_NS" ;;
+esac
+
 # --- safety ----------------------------------------------------------------
-if [ "$GATEWAY_NS" = "openshift-ingress" ]; then
-  echo "REFUSING to rename gateways in openshift-ingress — that is the cluster"
-  echo "router namespace and holds RHOAI's own data-science-gateway."
+# Creating in openshift-ingress is fine (that is where RHOAI keeps platform
+# gateways). DELETING from it is not — data-science-gateway lives there.
+if [ "$OLD_NS" = "openshift-ingress" ]; then
+  echo "REFUSING to delete a Gateway from openshift-ingress — that namespace holds"
+  echo "the cluster router and RHOAI's data-science-gateway."
   exit 1
 fi
-if [ "$OLD" = "$GATEWAY_NAME" ]; then
-  echo "Old and new names are identical ($OLD). Nothing to do."
+if [ "$OLD_NS" = "$GATEWAY_NS" ] && [ "$OLD" = "$GATEWAY_NAME" ]; then
+  echo "Old and new are identical ($OLD_NS/$OLD). Nothing to do."
   exit 0
 fi
-if ! oc get "$GW_RES" "$OLD" -n "$GATEWAY_NS" >/dev/null 2>&1; then
-  echo "ERROR: Gateway $GATEWAY_NS/$OLD not found. Existing gateways there:"
-  oc get "$GW_RES" -n "$GATEWAY_NS" -o wide
+if ! oc get "$GW_RES" "$OLD" -n "$OLD_NS" >/dev/null 2>&1; then
+  echo "ERROR: Gateway $OLD_NS/$OLD not found. Existing gateways there:"
+  oc get "$GW_RES" -n "$OLD_NS" -o wide
   exit 1
 fi
 
-OLD_HOST="$(oc get "$GW_RES" "$OLD" -n "$GATEWAY_NS" -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
-OLD_CERT="$(oc get "$GW_RES" "$OLD" -n "$GATEWAY_NS" -o jsonpath='{.spec.listeners[0].tls.certificateRefs[0].name}' 2>/dev/null || true)"
+OLD_HOST="$(oc get "$GW_RES" "$OLD" -n "$OLD_NS" -o jsonpath='{.spec.listeners[0].hostname}' 2>/dev/null || true)"
+OLD_CERT="$(oc get "$GW_RES" "$OLD" -n "$OLD_NS" -o jsonpath='{.spec.listeners[0].tls.certificateRefs[0].name}' 2>/dev/null || true)"
 NEW_HOST="${GATEWAY_HOSTNAME:-$OLD_HOST}"
 
-echo "==> rename plan"
-echo "    namespace : $GATEWAY_NS"
-echo "    old       : $OLD          host=$OLD_HOST cert=$OLD_CERT"
-echo "    new       : $GATEWAY_NAME host=$NEW_HOST cert=$GATEWAY_CERT_SECRET"
+echo "==> plan"
+echo "    old : $OLD_NS/$OLD          host=$OLD_HOST cert=$OLD_CERT"
+echo "    new : $GATEWAY_NS/$GATEWAY_NAME host=$NEW_HOST cert=$GATEWAY_CERT_SECRET"
+[ "$OLD_NS" != "$GATEWAY_NS" ] && echo "    (namespace move: $OLD_NS -> $GATEWAY_NS)"
+
+# A Gateway's TLS secret must live in the Gateway's own namespace. On a move,
+# copy it across before deleting the source.
+if ! oc get secret "$GATEWAY_CERT_SECRET" -n "$GATEWAY_NS" >/dev/null 2>&1; then
+  if [ -n "$OLD_CERT" ] && oc get secret "$OLD_CERT" -n "$OLD_NS" >/dev/null 2>&1; then
+    echo "==> copying TLS secret $OLD_NS/$OLD_CERT -> $GATEWAY_NS/$GATEWAY_CERT_SECRET"
+    TLS_CRT="$(oc get secret "$OLD_CERT" -n "$OLD_NS" -o jsonpath='{.data.tls\.crt}')"
+    TLS_KEY="$(oc get secret "$OLD_CERT" -n "$OLD_NS" -o jsonpath='{.data.tls\.key}')"
+    if [ -n "$TLS_CRT" ] && [ -n "$TLS_KEY" ]; then
+      oc create secret tls "$GATEWAY_CERT_SECRET" -n "$GATEWAY_NS" \
+        --cert=<(printf '%s' "$TLS_CRT" | base64 -d) \
+        --key=<(printf '%s' "$TLS_KEY" | base64 -d) \
+        --dry-run=client -o yaml | oc apply -f - >/dev/null
+    fi
+  fi
+fi
 
 # The certificate must survive the delete, otherwise the new listener has no TLS.
 if ! oc get secret "$GATEWAY_CERT_SECRET" -n "$GATEWAY_NS" >/dev/null 2>&1; then
@@ -86,13 +115,13 @@ fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP=".maas-backup/gateway-${STAMP}"
 mkdir -p "$BACKUP"; chmod 700 .maas-backup "$BACKUP"
-oc get "$GW_RES" "$OLD" -n "$GATEWAY_NS" -o yaml > "$BACKUP/gateway-${OLD}.yaml" 2>/dev/null || true
-oc get route -n "$GATEWAY_NS" -o yaml > "$BACKUP/routes.yaml" 2>/dev/null || true
+oc get "$GW_RES" "$OLD" -n "$OLD_NS" -o yaml > "$BACKUP/gateway-${OLD}.yaml" 2>/dev/null || true
+oc get route -n "$OLD_NS" -o yaml > "$BACKUP/routes.yaml" 2>/dev/null || true
 echo "    backup: $BACKUP"
 
 if [ "$ASSUME_YES" != 1 ]; then
   echo
-  printf 'Delete %s/%s and recreate as %s? [y/N] ' "$GATEWAY_NS" "$OLD" "$GATEWAY_NAME"
+  printf 'Delete %s/%s and recreate as %s/%s? [y/N] ' "$OLD_NS" "$OLD" "$GATEWAY_NS" "$GATEWAY_NAME"
   read -r C
   case "$C" in y|Y|yes) ;; *) echo "Aborted."; exit 1 ;; esac
 fi
@@ -100,22 +129,25 @@ fi
 # --- delete the old gateway (frees the Route host) -------------------------
 echo
 echo "==> deleting old gateway objects"
-oc delete route "$OLD" -n "$GATEWAY_NS" --ignore-not-found
+oc delete route "$OLD" -n "$OLD_NS" --ignore-not-found
 # Any Route claiming the hostname blocks the new one with HostAlreadyClaimed.
-for r in $(oc get route -n "$GATEWAY_NS" -o jsonpath='{range .items[*]}{.metadata.name}={.spec.host}{"\n"}{end}' 2>/dev/null || true); do
-  [ "${r#*=}" = "$NEW_HOST" ] || continue
-  echo "    releasing host $NEW_HOST held by route ${r%%=*}"
-  oc delete route "${r%%=*}" -n "$GATEWAY_NS" --ignore-not-found
+# Scan both namespaces: on a move the claim is in the source namespace.
+for scan_ns in "$OLD_NS" "$GATEWAY_NS"; do
+  for r in $(oc get route -n "$scan_ns" -o jsonpath='{range .items[*]}{.metadata.name}={.spec.host}{"\n"}{end}' 2>/dev/null || true); do
+    [ "${r#*=}" = "$NEW_HOST" ] || continue
+    echo "    releasing host $NEW_HOST held by route $scan_ns/${r%%=*}"
+    oc delete route "${r%%=*}" -n "$scan_ns" --ignore-not-found
+  done
 done
-oc delete "$GW_RES" "$OLD" -n "$GATEWAY_NS" --ignore-not-found
-oc delete svc -n "$GATEWAY_NS" -l "gateway.networking.k8s.io/gateway-name=${OLD}" --ignore-not-found 2>/dev/null || true
-oc delete envoyfilter -n "$GATEWAY_NS" \
+oc delete "$GW_RES" "$OLD" -n "$OLD_NS" --ignore-not-found
+oc delete svc -n "$OLD_NS" -l "gateway.networking.k8s.io/gateway-name=${OLD}" --ignore-not-found 2>/dev/null || true
+oc delete envoyfilter -n "$OLD_NS" \
   "kuadrant-auth-${OLD}" "kuadrant-${OLD}" "kuadrant-ratelimiting-${OLD}" "${OLD}-authn-ssl" \
   --ignore-not-found 2>/dev/null || true
 
 echo "    waiting for the old Gateway to disappear"
 for _ in $(seq 1 30); do
-  oc get "$GW_RES" "$OLD" -n "$GATEWAY_NS" >/dev/null 2>&1 || break
+  oc get "$GW_RES" "$OLD" -n "$OLD_NS" >/dev/null 2>&1 || break
   sleep 2
 done
 

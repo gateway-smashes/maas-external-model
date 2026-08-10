@@ -101,16 +101,16 @@ fi
 redact() {
   if [ "$HAVE_PERL" = 1 ]; then
     perl -pe '
-      s/(sk-[A-Za-z0-9_.-]{4})[A-Za-z0-9_.-]{4,}/$1***REDACTED***/g;
-      s/((?:api[-_]?key|apikey|token|password|passwd|secret|credential)[A-Za-z0-9_-]*\s*[:=]\s*)("?)(?!type=|\*\*\*|\{|\[)[^"\s,}]{6,}/$1$2***REDACTED***/gi;
-      s/(Bearer\s+)[A-Za-z0-9._~+\/-]{10,}/$1***REDACTED***/gi;
+      s/(sk-[A-Za-z0-9_.-]{4})[A-Za-z0-9_.-]{4,}/$1REDACTED/g;
+      s/((?:api[-_]?key|apikey|token|password|passwd|secret|credential)[A-Za-z0-9_-]*\s*[:=]\s*)("?)(?!type=|REDACTED|\{|\[)[^"\s,}]{6,}/$1$2REDACTED/gi;
+      s/(Bearer\s+)[A-Za-z0-9._~+\/-]{10,}/$1REDACTED/gi;
       s/(sha256[:~])[A-Za-z0-9]{16,}/$1***/g;
     '
   else
     sed -E \
-      -e 's/(sk-[A-Za-z0-9_.-]{4})[A-Za-z0-9_.-]{4,}/\1***REDACTED***/g' \
-      -e 's/((api[-_]?key|token|password|secret)[A-Za-z0-9_-]*[:=][[:space:]]*)("?)[^"[:space:],}]{6,}/\1\3***REDACTED***/g' \
-      -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+/-]{10,}/\1***REDACTED***/g'
+      -e 's/(sk-[A-Za-z0-9_.-]{4})[A-Za-z0-9_.-]{4,}/\1REDACTED/g' \
+      -e 's/((api[-_]?key|token|password|secret)[A-Za-z0-9_-]*[:=][[:space:]]*)("?)[^"[:space:],}]{6,}/\1\3REDACTED/g' \
+      -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._~+/-]{10,}/\1REDACTED/g'
   fi
 }
 
@@ -345,6 +345,21 @@ for crd in externalmodels.maas.opendatahub.io \
     esac
   fi
 done
+
+# The maas-controller takes --gateway-name/--gateway-namespace from an
+# operator-managed ConfigMap, so the only durable knob is whatever the DSC
+# exposes. Capture that schema — editing the ConfigMap or Deployment is reverted.
+cap schema-dsc-maas.txt "${OC[@]}" explain \
+  datasciencecluster.spec.components.kserve.modelsAsService --recursive
+cap schema-dsc-kserve.txt "${OC[@]}" explain \
+  datasciencecluster.spec.components.kserve --recursive
+if grep -qiE '^\s+gateway' "$RAW/schema-dsc-maas.txt" 2>/dev/null; then
+  finding OK dsc-maas-gateway "DSC exposes gateway fields under kserve.modelsAsService — see raw/schema-dsc-maas.txt." \
+    "Set the gateway there; the ConfigMap and Deployment are operator-owned and revert."
+else
+  finding INFO dsc-maas-gateway "DSC exposes no gateway field under kserve.modelsAsService on this build." \
+    "The MaaS gateway location is then fixed by the operator (usually openshift-ingress/maas-default-gateway)."
+fi
 
 # Endpoint pattern is the #1 blind-install trap (no scheme, no path, no :port).
 if [ -s "$RAW/schema-externalmodels-spec.txt" ]; then
