@@ -55,17 +55,22 @@ allowed_namespaces_json() {
   printf '%s\n' "${out[@]}" | jq -R . | jq -s -c .
 }
 
-route_labels_yaml() {
-  # Emit indented label lines from ROUTE_LABELS="k=v k2=v2"
-  local pair key val
+assert_route_labels() {
   if [[ -z "${ROUTE_LABELS:-}" ]]; then
     echo "ERROR: set ROUTE_LABELS in config.env (required for Route admission on this cluster)" >&2
     exit 1
   fi
   if [[ "$ROUTE_LABELS" == "changeme=true" ]]; then
-    echo "ERROR: replace ROUTE_LABELS=changeme=true with the real router/external-dns label(s)" >&2
+    echo "ERROR: replace ROUTE_LABELS=changeme=true with the real router label(s)" >&2
+    echo "  example: export ROUTE_LABELS=\"ingress.k8s.bb/class=nginx\"" >&2
     exit 1
   fi
+}
+
+# Emit indented, quoted label lines: key=value key2=value2
+route_labels_yaml() {
+  local pair key val
+  assert_route_labels
   for pair in $ROUTE_LABELS; do
     key="${pair%%=*}"
     val="${pair#*=}"
@@ -73,7 +78,8 @@ route_labels_yaml() {
       echo "ERROR: ROUTE_LABELS entries must be key=value (got: $pair)" >&2
       exit 1
     fi
-    printf '    %s: %s\n' "$key" "$val"
+    # Quote keys (may contain /) and values so YAML stays valid
+    printf '    "%s": "%s"\n' "$key" "$val"
   done
 }
 
@@ -104,20 +110,35 @@ render_gateway() {
 
 render_route() {
   local svc="$1"
-  local labels tmp
-  labels="$(route_labels_yaml)"
-  GATEWAY_SERVICE_NAME="$svc"
-  export GATEWAY_NS GATEWAY_NAME GATEWAY_HOSTNAME GATEWAY_SERVICE_NAME
-  tmp="$(mktemp)"
-  # shellcheck disable=SC2016
-  envsubst '${GATEWAY_NS} ${GATEWAY_NAME} ${GATEWAY_HOSTNAME} ${GATEWAY_SERVICE_NAME}' \
-    < cluster/20-maas-gateway-route.yaml >"$tmp"
-  # Replace the ${ROUTE_LABELS_YAML} sentinel with indented label lines
-  awk -v labels="$labels" '
-    index($0, "${ROUTE_LABELS_YAML}") { printf "%s", labels; next }
-    { print }
-  ' "$tmp"
-  rm -f "$tmp"
+  # Split heredocs so command-substitution cannot eat the newline before annotations
+  cat <<EOF
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ${GATEWAY_NAME}
+  namespace: ${GATEWAY_NS}
+  labels:
+    app.kubernetes.io/name: maas-gateway
+    app.kubernetes.io/instance: ${GATEWAY_NAME}
+    app.kubernetes.io/part-of: models-as-a-service
+EOF
+  route_labels_yaml
+  cat <<EOF
+  annotations:
+    opendatahub.io/managed: "false"
+spec:
+  host: ${GATEWAY_HOSTNAME}
+  to:
+    kind: Service
+    name: ${svc}
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+EOF
 }
 
 label_controller_routes() {
@@ -204,7 +225,7 @@ cmd_install() {
   export GATEWAY_HOSTNAME GATEWAY_ALLOWED_NAMESPACES_JSON
 
   # Fail fast on placeholder labels before creating anything heavy
-  route_labels_yaml >/dev/null
+  assert_route_labels
 
   echo "==> ensure TLS secret $GATEWAY_NS/$GATEWAY_CERT_SECRET"
   if ! oc get secret "$GATEWAY_CERT_SECRET" -n "$GATEWAY_NS" >/dev/null 2>&1; then
@@ -258,13 +279,14 @@ cmd_install() {
 
   cmd_ipp
 
+  # maas-ui autodiscovery is exactly https://maas.<domain>/maas-api — not maas-default-gateway.*
+  local want_maas_url="https://${GATEWAY_HOSTNAME}/maas-api"
   if [[ -n "${MAAS_API_URL:-}" ]]; then
-    echo "==> set maas-ui MAAS_API_URL=$MAAS_API_URL"
-    oc set env deploy/rhods-dashboard -n "$APP_NS" -c maas-ui "MAAS_API_URL=${MAAS_API_URL}" || true
-  elif [[ "$GATEWAY_HOSTNAME" != maas.* ]]; then
-    echo "==> GATEWAY_HOSTNAME is not maas.* — pointing maas-ui at https://${GATEWAY_HOSTNAME}/maas-api"
-    oc set env deploy/rhods-dashboard -n "$APP_NS" -c maas-ui \
-      "MAAS_API_URL=https://${GATEWAY_HOSTNAME}/maas-api" || true
+    want_maas_url="$MAAS_API_URL"
+  fi
+  if [[ -n "${MAAS_API_URL:-}" || ! "$GATEWAY_HOSTNAME" =~ ^maas\. ]]; then
+    echo "==> point maas-ui MAAS_API_URL=$want_maas_url"
+    oc set env deploy/rhods-dashboard -n "$APP_NS" -c maas-ui "MAAS_API_URL=${want_maas_url}" || true
   fi
 
   echo
