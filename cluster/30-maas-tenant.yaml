@@ -1,0 +1,21 @@
+# MaaS Tenant — binds the MaaS control plane to a Gateway.
+#
+# Without this object the controller falls back to a built-in default of
+# openshift-ingress/maas-default-gateway and every MaaSModelRef fails with:
+#   "HTTPRoute <ns>/<model> does not reference gateway
+#    openshift-ingress/maas-default-gateway (found: <your-gw>)"
+#
+# NOTE: "Tenant" is an ambiguous Kind. 3scale also ships tenants.capabilities.3scale.net,
+# so always address this one as tenants.maas.opendatahub.io — a bare `oc get tenant`
+# resolves to 3scale first and reports "No resources found".
+#
+# Applied by scripts/07-tenant.sh (envsubst).
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: Tenant
+metadata:
+  name: ${TENANT_NAME}
+  namespace: ${TENANT_NS}
+spec:
+  gatewayRef:
+    name: ${GATEWAY_NAME}
+    namespace: ${GATEWAY_NS}

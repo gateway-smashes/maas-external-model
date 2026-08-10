@@ -9,11 +9,27 @@ MODE="${1:-native}"
 : "${GATEWAY_NS:?set GATEWAY_NS in config.env}"
 : "${GATEWAY_NAME:?set GATEWAY_NAME in config.env}"
 
-# ExternalModel.spec.endpoint is FQDN only (no scheme/path).
+# ExternalModel.spec.endpoint is hostname/FQDN only — no scheme, path, or :port.
+# CRD pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9](...))?*$
 if [ -z "${PROVIDER_HOST:-}" ]; then
-  PROVIDER_HOST=$(printf '%s' "$PROVIDER_BASE_URL" | sed -E 's|^https?://||; s|/.*||')
+  PROVIDER_HOST=$(printf '%s' "$PROVIDER_BASE_URL" \
+    | sed -E 's|^https?://||; s|/.*||; s|:[0-9]+$||')
   export PROVIDER_HOST
 fi
+# Strip :port if someone set PROVIDER_HOST with it
+if [[ "$PROVIDER_HOST" == *:* ]]; then
+  echo "WARNING: PROVIDER_HOST must not include :port (got '$PROVIDER_HOST'); stripping"
+  PROVIDER_HOST="${PROVIDER_HOST%%:*}"
+  export PROVIDER_HOST
+fi
+PROVIDER_PORT=$(printf '%s' "${PROVIDER_BASE_URL:-}" \
+  | sed -E 's|^https?://||; s|/.*||; s|^[^:]*:?||')
+if [[ -n "${PROVIDER_PORT:-}" && "$PROVIDER_PORT" != "443" && "$PROVIDER_PORT" != "80" ]]; then
+  echo "WARNING: provider uses port ${PROVIDER_PORT}; ExternalModel.spec.endpoint cannot carry a port."
+  echo "         Controllers usually originate TLS to :443. For in-cluster :${PROVIDER_PORT} (e.g. OLS),"
+  echo "         expose the service on 443 or put a TLS sidecar / Route in front."
+fi
+echo ">> provider host: $PROVIDER_HOST"
 
 echo ">> namespace $MAAS_NS"
 oc create namespace "$MAAS_NS" --dry-run=client -o yaml | oc apply -f -

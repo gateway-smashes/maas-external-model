@@ -70,9 +70,31 @@ export IPP_NS="$GATEWAY_NS"
 
 ### 2. Discover
 
+Run this **first on any cluster you do not know**. It assumes nothing (no
+`config.env`, no prior install), collects a redacted evidence bundle, and prints
+PASS / WARN / FAIL per check with a fix command. Exits non-zero if anything is
+blocking.
+
 ```bash
-./scripts/00-discover.sh | tee discover-output.txt
+./scripts/00-discover.sh
 ```
+
+```bash
+./scripts/00-discover.sh -n my-models --gateway-probe --egress --insecure
+```
+
+It writes `diag-<cluster>-<stamp>/` containing:
+
+| file | contents |
+|---|---|
+| `report.md` | findings + ordered list of blocking problems |
+| `findings.tsv` | machine-readable `severity / id / section / message / fix` |
+| `config.env.discovered` | `MAAS_NS`, gateway, tenant, domain observed on the cluster |
+| `raw/` | every dump (CRD schemas, conditions, logs, events) |
+| `…​.tgz` | the whole bundle, secrets redacted — safe to share |
+
+Point it at the namespace you intend to use even if it does not exist yet — a
+missing namespace is reported as a clean slate, not an error.
 
 ### 3. Install / replace the MaaS gateway
 

@@ -16,7 +16,7 @@ metadata:
 spec:
   # openai | anthropic | azure-openai | vertex | bedrock-openai
   provider: openai
-  # FQDN only — no scheme or path
+  # Hostname/FQDN only — no scheme, path, or :port
   endpoint: ${PROVIDER_HOST}
   targetModel: ${PROVIDER_MODEL_ID}
   credentialRef:

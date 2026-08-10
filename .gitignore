@@ -3,6 +3,8 @@ config.env
 config.env.bak
 # Discovery output can contain hostnames, tokens, cluster internals
 discover-output.txt
+diag-*/
+diag-*.tgz
 *.log
 *.tmp
 
@@ -14,3 +16,6 @@ rendered/
 .DS_Store
 Thumbs.db
 .writetest
+
+# MaaS pre-teardown backups (contain provider API keys)
+.maas-backup/
