@@ -46,15 +46,27 @@ cp config.env.example config.env
 $EDITOR config.env
 ```
 
-Important gateway settings in `config.env`:
+Important settings in `config.env`:
 
 ```bash
-export GATEWAY_NS="maas-gateway"              # dedicated NS (recommended)
+export CUSTOM_DOMAIN="ai.example.com"   # no *.apps DNS
+export ROUTE_LABELS="your-router-label=value"         # required on Routes
+
+export GATEWAY_NS="maas-gateway"              # MaaS only (NOT dashboard)
 export GATEWAY_NAME="maas-default-gateway"
-export GATEWAY_HOSTNAME=""                    # empty => maas.<cluster-domain>
+export GATEWAY_HOSTNAME=""                    # empty => maas.${CUSTOM_DOMAIN}
 export GATEWAY_CERT_SECRET="maas-gateway-tls"
-export IPP_NS="$GATEWAY_NS"                   # where payload-processing runs
+export IPP_NS="$GATEWAY_NS"
 ```
+
+**Two hosts, two Gateways:**
+
+| URL | Purpose | Object |
+|---|---|---|
+| `https://openshift-ai.${CUSTOM_DOMAIN}` | OpenShift AI dashboard | `data-science-gateway` (RHOAI — leave alone) |
+| `https://maas.${CUSTOM_DOMAIN}` | MaaS API + chat | `maas-default-gateway` (this repo) |
+
+`data-science-gateway` is the **dashboard** Gateway name, not the MaaS hostname.
 
 ### 2. Discover
 
@@ -64,14 +76,13 @@ export IPP_NS="$GATEWAY_NS"                   # where payload-processing runs
 
 ### 3. Install / replace the MaaS gateway
 
-Deletes are optional; `reinstall` tears down this gateway then creates it again.
-
 ```bash
-./scripts/05-gateway.sh delete       # remove previous GATEWAY_NS/GATEWAY_NAME
-# DELETE_GATEWAY_NS=true ./scripts/05-gateway.sh delete   # also drop the namespace
-
-./scripts/05-gateway.sh install      # NS + Gateway + Tenant gatewayRef + IPP fix
+# Set ROUTE_LABELS to the real cluster label first (not changeme=true)
+./scripts/05-gateway.sh delete       # only maas-default-gateway (+ Route)
+./scripts/05-gateway.sh install      # NS + Gateway + Route + Tenant + IPP
 ./scripts/05-gateway.sh status
+
+# Point DNS: maas.${CUSTOM_DOMAIN} → cluster router / LB
 ```
 
 ### 4. Apply the external model

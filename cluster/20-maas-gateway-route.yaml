@@ -1,0 +1,30 @@
+# OpenShift Route for the MaaS Gateway Service (passthrough TLS).
+# Needed when *.apps.<cluster-domain> has no DNS — host must be CUSTOM_DOMAIN.
+# Labels from ROUTE_LABELS (required by some router / external-dns setups).
+#
+# Rendered by scripts/05-gateway.sh (envsubst).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ${GATEWAY_NAME}
+  namespace: ${GATEWAY_NS}
+  labels:
+    app.kubernetes.io/name: maas-gateway
+    app.kubernetes.io/instance: ${GATEWAY_NAME}
+    app.kubernetes.io/part-of: models-as-a-service
+    # ROUTE_LABELS_BLOCK injected by 05-gateway.sh (key: value lines)
+${ROUTE_LABELS_YAML}
+  annotations:
+    opendatahub.io/managed: "false"
+spec:
+  host: ${GATEWAY_HOSTNAME}
+  to:
+    kind: Service
+    name: ${GATEWAY_SERVICE_NAME}
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

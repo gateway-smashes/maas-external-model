@@ -244,41 +244,68 @@ For production use RDS / Crunchy / Azure Database. Upstream helper:
 `NAMESPACE=redhat-ods-applications ./scripts/setup-database.sh` from
 [opendatahub-io/models-as-a-service](https://github.com/opendatahub-io/models-as-a-service).
 
-### 3.6 MaaS Gateway in a dedicated namespace (recommended)
+### 3.6 Dashboard vs MaaS gateway (read this)
 
-`maas-ui` auto-discovers `https://maas.<cluster-domain>/maas-api`. Put a real
-Gateway behind that hostname. **Prefer a dedicated namespace** (`GATEWAY_NS`,
-default `maas-gateway`) so you are not sharing `openshift-ingress` with other
-gateways.
+There are **two** different things named “gateway”:
+
+| Role | K8s object | Hostname (this cluster) | Who manages it |
+|---|---|---|---|
+| **Dashboard** (OpenShift AI UI) | `Gateway/data-science-gateway` in `openshift-ingress` | `openshift-ai.${CUSTOM_DOMAIN}` via `GatewayConfig/default-gateway` | RHOAI operator — **leave alone** |
+| **MaaS / inference** | `Gateway/maas-default-gateway` in `$GATEWAY_NS` | `maas.${CUSTOM_DOMAIN}` | **this repo** (`05-gateway.sh`) |
+
+`data-science-gateway` is the **name of the dashboard Gateway object**, not
+“the MaaS gateway hostname”. On your cluster the dashboard URL is already
+`https://openshift-ai.<CUSTOM_DOMAIN>` because `GatewayConfig.spec.subdomain`
+is `openshift-ai`.
+
+You **do need a second Gateway** for MaaS. Pointing Tenant / chat at
+`data-science-gateway` sends traffic into the dashboard stack and will not
+give you a working Models-as-a-Service path.
+
+No wildcard DNS on `*.apps.<cluster-domain>` ⇒ set:
 
 ```bash
-# config.env
-export GATEWAY_NS="maas-gateway"
-export GATEWAY_NAME="maas-default-gateway"
-export GATEWAY_HOSTNAME=""                 # empty => maas.<cluster-domain>
-export GATEWAY_CERT_SECRET="maas-gateway-tls"
-export IPP_NS="$GATEWAY_NS"
+export CUSTOM_DOMAIN="ai.example.com"
+export ROUTE_LABELS="your-router-label=value"   # required for Route admission
+export GATEWAY_HOSTNAME=""                      # empty => maas.${CUSTOM_DOMAIN}
+```
 
-# Tear down an old gateway (optional), then install
-./scripts/05-gateway.sh delete
+```bash
+./scripts/05-gateway.sh delete      # only $GATEWAY_NS/$GATEWAY_NAME (+ its Route)
 ./scripts/05-gateway.sh install
 ./scripts/05-gateway.sh status
 
-curl -sk "https://$(oc get gateway $GATEWAY_NAME -n $GATEWAY_NS \
-  -o jsonpath='{.spec.listeners[0].hostname}')/maas-api/health"
+# Publish DNS yourself:
+#   maas.${CUSTOM_DOMAIN}  →  cluster ingress / router VIP
+curl -sk "https://maas.${CUSTOM_DOMAIN}/maas-api/health"
 ```
 
-What `05-gateway.sh install` does:
+#### What `05-gateway.sh install` creates / updates
 
-1. Creates Namespace `$GATEWAY_NS`
-2. Ensures TLS Secret `$GATEWAY_CERT_SECRET` in that NS (copies from
-   `openshift-ingress` when possible)
-3. Applies GatewayClass + Gateway (`cluster/10-maas-default-gateway.yaml`)
-4. Patches Tenant `gatewayRef` → `$GATEWAY_NS/$GATEWAY_NAME`
-5. Applies IPP EnvoyFilter fix into `$GATEWAY_NS` (§3.7)
+| Action | Resource |
+|---|---|
+| **Create** (if missing) | `Namespace/$GATEWAY_NS` |
+| **Create/update** | `Secret/$GATEWAY_CERT_SECRET` in `$GATEWAY_NS` (copy from `openshift-ingress` when possible) |
+| **Create/update** | `GatewayClass/$GATEWAY_CLASS` (cluster-scoped) |
+| **Create/update** | `Gateway/$GATEWAY_NAME` in `$GATEWAY_NS` (listener host = `maas.$CUSTOM_DOMAIN`) |
+| **Create/update** | `Route/$GATEWAY_NAME` in `$GATEWAY_NS` (host + `ROUTE_LABELS`) |
+| **Label** | any controller-created Routes for that gateway with `ROUTE_LABELS` |
+| **Patch** | `Tenant/$TENANT_NAME.spec.gatewayRef` → `$GATEWAY_NS/$GATEWAY_NAME` |
+| **Create/update** | `EnvoyFilter/payload-processing-attach-fix` |
+| **Patch** (if present) | `EnvoyFilter/payload-processing` (clear bad product patches) |
+| **Restart** | gateway pods for `$GATEWAY_NAME` |
+| **Optional env** | `rhods-dashboard` `maas-ui` `MAAS_API_URL` if hostname ≠ `maas.*` |
 
-**Do not** use the dashboard / data-science gateway (`openshift-ai.*`) as the
-MaaS gateway. Keep that separate.
+#### What is **not** touched
+
+- `Gateway/data-science-gateway` / dashboard Routes / `GatewayConfig`
+- `openshift-ingress` namespace (when `$GATEWAY_NS=maas-gateway`)
+- model CRs (`ExternalModel`, subscriptions) — those come from `10-apply.sh`
+
+#### What `05-gateway.sh delete` removes
+
+Only objects for `$GATEWAY_NS/$GATEWAY_NAME`: the Route, Gateway, its Service,
+related Kuadrant/IPP EnvoyFilters. Never `data-science-gateway`.
 
 ### 3.7 IPP EnvoyFilter attach (auth before path rewrite)
 

@@ -53,8 +53,16 @@ echo "--- listener hostname ---"
 oc get gateway "$GATEWAY_NAME" -n "$GATEWAY_NS" -o jsonpath='{.spec.listeners[*].hostname}{"\n"}' 2>/dev/null || true
 echo "--- Tenant gatewayRef ---"
 oc get tenant -n "${TENANT_NS:-models-as-a-service}" -o jsonpath='{range .items[*]}{.metadata.name}{" -> "}{.spec.gatewayRef.namespace}{"/"}{.spec.gatewayRef.name}{" phase="}{.status.phase}{"\n"}{end}' 2>/dev/null || true
-echo "--- GatewayConfig (dashboard / data-science gateway; not MaaS) ---"
-oc get gatewayconfig default-gateway -o jsonpath='{.spec}{"\n"}' 2>/dev/null
+echo "--- GatewayConfig (DASHBOARD only: data-science-gateway → openshift-ai.*; not MaaS) ---"
+oc get gatewayconfig default-gateway -o jsonpath='domain={.spec.domain} subdomain={.spec.subdomain}{"\n"}{.spec}{"\n"}' 2>/dev/null
+echo "--- config.env DNS ---"
+echo "CUSTOM_DOMAIN=${CUSTOM_DOMAIN:-"(unset)"} GATEWAY_HOSTNAME=${GATEWAY_HOSTNAME:-"(auto)"} ROUTE_LABELS=${ROUTE_LABELS:-"(unset)"}"
+echo "--- Routes in GATEWAY_NS ---"
+oc get route -n "${GATEWAY_NS:-maas-gateway}" -o wide 2>/dev/null || true
+echo "--- Sample route labels elsewhere (find the required key) ---"
+oc get route -A -o json 2>/dev/null \
+  | jq -r '[.items[].metadata.labels | keys[]] | unique | .[]' 2>/dev/null | head -40 \
+  || true
 
 h "I. Egress reachability to your provider from inside the cluster"
 echo "run manually if you want:"
