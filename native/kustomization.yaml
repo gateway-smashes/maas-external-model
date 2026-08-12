@@ -6,3 +6,4 @@ resources:
   - 00-namespace.yaml
   - 20-externalmodel.yaml
   - 30-maas-access.yaml
+  - 40-genai-dashboard-configmaps.yaml

@@ -1,0 +1,33 @@
+# Per-project state ConfigMaps that the Gen AI dashboard reads.
+#
+# Symptom this fixes:
+#   gen-ai-ui: level=ERROR msg="failed to get ConfigMap"
+#              error="configmaps \"gen-ai-aa-custom-model-endpoints\" not found"
+#   gen-ai-ui: level=ERROR msg="failed to get ConfigMap"
+#              error="configmaps \"gen-ai-aa-vector-stores\" not found"
+#
+# The dashboard creates these lazily the first time you use Gen AI studio in a
+# project. A scripted install never clicks through the UI, so they are absent
+# and gen-ai-ui logs an error on every poll.
+#
+# Created empty on purpose: the dashboard owns the contents and will populate
+# them. We only need the objects to exist so the reads stop failing.
+#
+# Applied by scripts/10-apply.sh (envsubst) with the rest of native/.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-ai-aa-custom-model-endpoints
+  namespace: ${MAAS_NS}
+  labels:
+    opendatahub.io/dashboard: "true"
+    app.kubernetes.io/part-of: genai-playground
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-ai-aa-vector-stores
+  namespace: ${MAAS_NS}
+  labels:
+    opendatahub.io/dashboard: "true"
+    app.kubernetes.io/part-of: genai-playground
