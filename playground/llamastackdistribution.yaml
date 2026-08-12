@@ -27,9 +27,13 @@ spec:
     containerSpec:
       port: 8321
       env:
-        # Point LlamaStack at the MaaS gateway path for this model.
+        # Point LlamaStack at the shim, not directly at the gateway.
+        # remote::vllm discovers models via {VLLM_URL}/models, which MaaS does
+        # not serve under the per-model prefix (404). The shim answers that one
+        # path and forwards everything else to the working prefix.
+        # See playground/model-shim.yaml.
         - name: VLLM_URL
-          value: "https://${GATEWAY_HOSTNAME}/${MAAS_NS}/${MODEL_NAME}/v1"
+          value: "http://lsd-model-shim.${MAAS_NS}.svc:8080/v1"
         # Real MaaS API key. The stock LSD ships VLLM_API_TOKEN_1=fake, which
         # makes every playground call fail with no visible error.
         - name: VLLM_API_TOKEN_1
@@ -53,3 +57,14 @@ spec:
           value: "${MODEL_NAME}"
         - name: PLAYGROUND_PROVIDER_ID
           value: "${PLAYGROUND_PROVIDER_ID}"
+        # The RH distribution image defines BOTH storage backends as Postgres
+        # (kv_postgres + sql_postgres) with no sqlite fallback. Without these
+        # the pod crashloops on "Could not connect to PostgreSQL database
+        # server". See playground/postgres.yaml.
+        - name: POSTGRES_HOST
+          value: "lsd-postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: lsd-postgres
+              key: password

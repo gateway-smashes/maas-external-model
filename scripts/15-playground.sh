@@ -35,7 +35,10 @@ GW_RES="gateways.gateway.networking.k8s.io"
 LSD_NAME="${LSD_NAME:-lsd-genai-playground}"
 SUBSCRIPTION="${SUBSCRIPTION:-${MODEL_NAME}-access}"
 PLAYGROUND_MAX_TOKENS="${PLAYGROUND_MAX_TOKENS:-512}"
-PLAYGROUND_PROVIDER_ID="${PLAYGROUND_PROVIDER_ID:-maas-vllm-inference-1}"
+# Empty by default: the provider id differs per distribution image, so the
+# registration step reads it from /v1/providers. Set it only to disambiguate
+# when more than one inference provider exists.
+PLAYGROUND_PROVIDER_ID="${PLAYGROUND_PROVIDER_ID:-}"
 APP_NS="${APP_NS:-redhat-ods-applications}"
 
 oc get crd "$LSD_RES" >/dev/null 2>&1 || {
@@ -57,42 +60,46 @@ if [ -n "${LSD_DISTRIBUTION_IMAGE:-}" ]; then
 elif [ -n "${LSD_DISTRIBUTION_NAME:-}" ]; then
   LSD_DIST_KEY="name"; LSD_DIST_VALUE="$LSD_DISTRIBUTION_NAME"; SRC="\$LSD_DISTRIBUTION_NAME"
 else
-  # copy from an existing LSD anywhere on the cluster
-  EX_NAME="$(oc get "$LSD_RES" -A -o jsonpath='{.items[0].spec.server.distribution.name}' 2>/dev/null || true)"
-  EX_IMG="$(oc get "$LSD_RES" -A -o jsonpath='{.items[0].spec.server.distribution.image}' 2>/dev/null || true)"
-  if [ -n "$EX_NAME" ]; then
-    LSD_DIST_KEY="name"; LSD_DIST_VALUE="$EX_NAME"; SRC="existing LlamaStackDistribution"
-  elif [ -n "$EX_IMG" ]; then
-    LSD_DIST_KEY="image"; LSD_DIST_VALUE="$EX_IMG"; SRC="existing LlamaStackDistribution"
-  else
-    # The operator publishes a distribution -> image map in a ConfigMap. Match
-    # ONLY llama-named ConfigMaps: the RHOAI namespace is full of unrelated
-    # *-image-parameters maps (kf-notebook-controller etc), and picking the
-    # "first key" of one of those silently produces a nonsense distribution.
     OP_NS="$(oc get deploy -A -o jsonpath='{range .items[?(@.metadata.name=="llama-stack-k8s-operator-controller-manager")]}{.metadata.namespace}{end}' 2>/dev/null || true)"
-    CANDS=""
+
+    # Authoritative source: the operator advertises every distribution it
+    # supports as RELATED_IMAGE_<NAME>_DISTRIBUTION, e.g. on RHOAI 3.4:
+    #   RELATED_IMAGE_RH_DISTRIBUTION=registry.redhat.io/rhoai/odh-llama-stack-core-rhel9@sha256:...
+    # Take the image from the right-hand side. Do NOT try to derive a short
+    # name from the middle: "rh" is rejected with "Distribution name not
+    # supported", after which the operator stops reconciling the CR entirely.
     if [ -n "$OP_NS" ]; then
-      for cm in $(oc get cm -n "$OP_NS" -o name 2>/dev/null | grep -i 'llama' || true); do
-        KEYS="$(oc get "$cm" -n "$OP_NS" -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-        [ -n "$KEYS" ] || continue
-        echo "==> candidate map $OP_NS/$(basename "$cm"):"
-        printf '      %s\n' $KEYS
-        CANDS="$CANDS $KEYS"
-      done
+      DIST_ENV="$(oc set env deploy/llama-stack-k8s-operator-controller-manager \
+        -n "$OP_NS" --list 2>/dev/null | grep -E '^RELATED_IMAGE_.+_DISTRIBUTION=' || true)"
+      NDIST="$(printf '%s\n' "$DIST_ENV" | grep -c . || true)"
+      if [ "${NDIST:-0}" = "1" ]; then
+        # Use the IMAGE, not a name derived from the env var. The operator's
+        # name table is not simply the lowercased env var middle -- deriving
+        # "rh" from RELATED_IMAGE_RH_DISTRIBUTION is rejected with
+        # "Distribution name not supported". The image ref always works.
+        LSD_DIST_KEY="image"
+        LSD_DIST_VALUE="${DIST_ENV#*=}"
+        SRC="operator env RELATED_IMAGE_*_DISTRIBUTION in $OP_NS"
+      elif [ "${NDIST:-0}" -gt 1 ]; then
+        echo "==> operator supports several distributions:"
+        printf '%s\n' "$DIST_ENV" \
+          | sed -E 's/^RELATED_IMAGE_(.+)_DISTRIBUTION=.*/      \1/' | tr 'A-Z' 'a-z'
+        echo "ERROR: pick one explicitly rather than letting this script choose:"
+        echo "         LSD_DISTRIBUTION_NAME=<name> ./scripts/15-playground.sh"
+        exit 1
+      fi
     fi
-    # Accept automatically only when there is exactly one candidate.
-    NCAND="$(printf '%s' "$CANDS" | tr ' ' '\n' | grep -c . || true)"
-    if [ "${NCAND:-0}" = "1" ]; then
-      LSD_DIST_KEY="name"; LSD_DIST_VALUE="$(printf '%s' "$CANDS" | tr -d ' ')"
-      SRC="$OP_NS llama ConfigMap (only candidate)"
-    elif [ "${NCAND:-0}" -gt 1 ]; then
-      echo
-      echo "ERROR: multiple distributions available — pick one explicitly rather than"
-      echo "       letting this script choose:"
-      printf '         LSD_DISTRIBUTION_NAME=%s ./scripts/15-playground.sh\n' $CANDS
-      exit 1
+
+    # Last resort: copy from an LSD that already works on this cluster.
+    if [ -z "$LSD_DIST_VALUE" ]; then
+      EX_NAME="$(oc get "$LSD_RES" -A -o jsonpath='{.items[0].spec.server.distribution.name}' 2>/dev/null || true)"
+      EX_IMG="$(oc get "$LSD_RES" -A -o jsonpath='{.items[0].spec.server.distribution.image}' 2>/dev/null || true)"
+      if [ -n "$EX_NAME" ]; then
+        LSD_DIST_KEY="name"; LSD_DIST_VALUE="$EX_NAME"; SRC="existing LlamaStackDistribution"
+      elif [ -n "$EX_IMG" ]; then
+        LSD_DIST_KEY="image"; LSD_DIST_VALUE="$EX_IMG"; SRC="existing LlamaStackDistribution"
+      fi
     fi
-  fi
 fi
 
 if [ -z "$LSD_DIST_VALUE" ]; then
@@ -114,6 +121,17 @@ Find a valid value, then re-run with it:
 EOF
   exit 1
 fi
+# Sanity: a resolved distribution that matches a namespace on this cluster is
+# almost certainly a resolution bug, not a real distribution. Refuse it rather
+# than writing a CR the operator will reject.
+if oc get ns "$LSD_DIST_VALUE" >/dev/null 2>&1; then
+  echo "ERROR: resolved distribution '${LSD_DIST_VALUE}' is a namespace name (source: ${SRC})."
+  echo "       That is a bad resolution, not a distribution. Pin one explicitly:"
+  echo "         LSD_DISTRIBUTION_NAME=<name>   ./scripts/15-playground.sh"
+  echo "         LSD_DISTRIBUTION_IMAGE=<image> ./scripts/15-playground.sh"
+  exit 1
+fi
+
 echo "==> distribution: ${LSD_DIST_KEY}=${LSD_DIST_VALUE}   (source: ${SRC})"
 [ "$CMD" = "resolve" ] && exit 0
 
@@ -159,22 +177,53 @@ oc create secret generic lsd-maas-api-key -n "$MAAS_NS" \
 # --- 3. apply the LSD -------------------------------------------------------
 export LSD_NAME MAAS_NS MODEL_NAME GATEWAY_HOSTNAME PLAYGROUND_MAX_TOKENS \
        PLAYGROUND_PROVIDER_ID LSD_DIST_KEY LSD_DIST_VALUE
-echo "==> applying LlamaStackDistribution $MAAS_NS/$LSD_NAME"
-envsubst < native/40-llamastackdistribution.yaml | oc apply -f -
+echo "==> applying Postgres backend for the distribution"
+envsubst < playground/postgres.yaml | oc apply -f -
 
-echo "==> waiting for rollout"
-for _ in $(seq 1 36); do
-  oc get deploy "$LSD_NAME" -n "$MAAS_NS" >/dev/null 2>&1 && break
+echo "==> applying model-discovery shim"
+envsubst < playground/model-shim.yaml | oc apply -f -
+oc rollout status deploy/lsd-model-shim -n "$MAAS_NS" --timeout=180s || true
+
+echo "==> applying LlamaStackDistribution $MAAS_NS/$LSD_NAME"
+envsubst < playground/llamastackdistribution.yaml | oc apply -f -
+
+echo "==> waiting for the operator to create the Deployment"
+DEPLOY_OK=0
+for _ in $(seq 1 24); do
+  if oc get deploy "$LSD_NAME" -n "$MAAS_NS" >/dev/null 2>&1; then DEPLOY_OK=1; break; fi
   sleep 5
 done
+
+# The API server accepts any distribution string; the operator validates it and
+# then silently stops reconciling ("Distribution name not supported"). Without
+# this check you get a CR, no Deployment, no Service, and maas-ui reporting
+# "has no service url" with nothing explaining why.
+if [ "$DEPLOY_OK" != 1 ]; then
+  echo
+  echo "ERROR: the operator did not create a Deployment for $MAAS_NS/$LSD_NAME."
+  echo "       Distribution used: ${LSD_DIST_KEY}=${LSD_DIST_VALUE} (source: ${SRC})"
+  echo
+  echo "  operator says:"
+  oc logs -n "${LSD_OP_NS:-redhat-ods-applications}" \
+    deploy/llama-stack-k8s-operator-controller-manager --tail=200 2>/dev/null \
+    | grep -iE "$LSD_NAME|distribution" | tail -5 | sed 's/^/      /'
+  echo
+  echo "  'Distribution name not supported' means the value above is not in the"
+  echo "  operator's table. Re-run pinning a supported one:"
+  echo "      LSD_DISTRIBUTION_NAME=<name>   ./scripts/15-playground.sh"
+  echo "      LSD_DISTRIBUTION_IMAGE=<image> ./scripts/15-playground.sh"
+  exit 1
+fi
 oc rollout status "deploy/${LSD_NAME}" -n "$MAAS_NS" --timeout=300s || true
 
-# --- 4. short model-id alias -----------------------------------------------
-echo "==> applying short model-id alias (UI sends '<model>', LSD registers '<provider>/<model>')"
-./cluster/lsd-playground-fix.sh || {
-  echo "WARNING: lsd-playground-fix.sh failed. The LSD exists, but the playground may"
-  echo "         404 on the short model id until the alias is in place."
-}
+# --- 4. nothing to register -----------------------------------------------
+# This image exposes /v1/models as GET-only (no registration API) and its run
+# config has no static `models:` section, so the model can ONLY appear via
+# provider discovery -- which is why playground/model-shim.yaml exists and why
+# VLLM_URL points at it rather than at the gateway.
+echo "==> models come from discovery via the shim; verifying"
+oc get deploy lsd-model-shim -n "$MAAS_NS" >/dev/null 2>&1 \
+  || echo "WARNING: lsd-model-shim is not deployed -- the playground will list no models."
 
 cat <<EOF
 

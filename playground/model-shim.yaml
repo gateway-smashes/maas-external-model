@@ -1,0 +1,105 @@
+# OpenAI-compatible shim so LlamaStack can discover the MaaS model.
+#
+# The problem it solves:
+#   MaaS serves chat only under the per-model prefix:
+#     POST /<ns>/<model>/v1/chat/completions   -> 200
+#     GET  /<ns>/<model>/v1/models             -> 404
+#   and the model catalogue only at the gateway root:
+#     GET  /v1/models                          -> 200
+#     POST /v1/chat/completions                -> 404   (needs a catch-all route)
+#
+# LlamaStack's remote::vllm provider registers models by calling
+# {base_url}/models and this image has no registration API (/v1/models is
+# GET-only) and no static `models:` section in its run config. So neither URL
+# works on its own.
+#
+# This shim answers /v1/models itself with exactly the one model, and forwards
+# everything else to the per-model prefix that already works.
+#
+# Rendered by envsubst: MAAS_NS, MODEL_NAME, GATEWAY_HOSTNAME.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lsd-model-shim
+  namespace: ${MAAS_NS}
+data:
+  maas.conf: |
+    # Discovery: a fixed catalogue of one model. LlamaStack only needs id here.
+    location = /v1/models {
+        default_type application/json;
+        return 200 '{"object":"list","data":[{"id":"${MODEL_NAME}","object":"model","created":0,"owned_by":"maas"}]}';
+    }
+
+    # Everything else -> the MaaS per-model prefix. The trailing slash on
+    # proxy_pass replaces the matched "/" so /v1/chat/completions becomes
+    # /<ns>/<model>/v1/chat/completions.
+    location / {
+        proxy_pass https://${GATEWAY_HOSTNAME}/${MAAS_NS}/${MODEL_NAME}/;
+        proxy_set_header Host ${GATEWAY_HOSTNAME};
+        # SNI must match: the gateway routes on it.
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${GATEWAY_HOSTNAME};
+        # The gateway cert is signed by a CA the cluster does not trust yet.
+        # Remove once the corporate CA is in the cluster trust bundle.
+        proxy_ssl_verify off;
+        proxy_http_version 1.1;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lsd-model-shim
+  namespace: ${MAAS_NS}
+  labels:
+    app.kubernetes.io/name: lsd-model-shim
+    app.kubernetes.io/part-of: genai-playground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lsd-model-shim
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lsd-model-shim
+    spec:
+      containers:
+        - name: nginx
+          image: registry.redhat.io/rhel9/nginx-124:latest
+          # This is an S2I BUILDER image: with no command it prints usage and
+          # exits. Start nginx directly. Its /etc/nginx/nginx.conf already
+          # defines a server on :8080 that includes nginx.default.d/*.conf,
+          # which is where maas.conf is mounted below.
+          command: ["nginx", "-g", "daemon off;"]
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            # nginx.default.d is included INSIDE the default server block, so
+            # these are locations, not a second server competing for :8080.
+            - name: conf
+              mountPath: /opt/app-root/etc/nginx.default.d
+          readinessProbe:
+            httpGet: { path: /v1/models, port: 8080 }
+            initialDelaySeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: conf
+          configMap:
+            name: lsd-model-shim
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lsd-model-shim
+  namespace: ${MAAS_NS}
+spec:
+  selector:
+    app.kubernetes.io/name: lsd-model-shim
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
