@@ -12,6 +12,12 @@ spec:
   subjects:
     users:
       - admin
+      # maas-ui calls maas-api with the dashboard ServiceAccount token, NOT the
+      # logged-in user's bearer token. Without this subject the dashboard gets
+      # HTTP 403 with an empty body on /maas-api/v1/api-keys/search while the
+      # same call with `oc whoami -t` returns 200. Named explicitly rather than
+      # relying on system:authenticated covering service accounts.
+      - ${DASHBOARD_SA}
     # Groups are objects with name (not bare strings). Widen so playground /
     # authenticated users see and can call the model (not only cluster-admin).
     groups:
@@ -26,6 +32,7 @@ spec:
   owner:
     users:
       - admin
+      - ${DASHBOARD_SA}
     groups:
       - name: system:authenticated
   modelRefs:

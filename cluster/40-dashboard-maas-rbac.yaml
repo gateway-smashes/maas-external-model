@@ -1,0 +1,44 @@
+# Let the dashboard ServiceAccount call maas-api.
+#
+# Symptom this fixes:
+#   maas-ui: level=ERROR msg="unknown error when invoking maas-api (unmarshall)"
+#            statusCode=403 endpoint=.../maas-api/v1/api-keys/search
+#   ...while the same request with `oc whoami -t` returns 200.
+#
+# Cause: maas-ui authenticates as the dashboard ServiceAccount and maas-api
+# authorizes with SubjectAccessReview. RHOAI ships maas-viewer-role and
+# maas-owner-role but binds NEITHER — only maas-api, maas-api-supplemental and
+# maas-controller-rolebinding exist out of the box. So the dashboard SA has no
+# MaaS permissions at all until you create this binding.
+#
+# Binds a PRODUCT role on purpose: a hand-written ClusterRole would drift from
+# whatever future RHOAI versions require. Do not replace this with a custom role
+# unless the product roles genuinely lack a verb you need.
+#
+# maas-viewer-role is the least-privilege choice and covers read/search. If the
+# dashboard also needs to CREATE or REVOKE API keys, switch to maas-owner-role:
+#   MAAS_DASHBOARD_ROLE=maas-owner-role
+#
+# Apply with:
+#   APP_NS=redhat-ods-applications DASHBOARD_SA_NAME=rhods-dashboard \
+#   MAAS_DASHBOARD_ROLE=maas-viewer-role \
+#     envsubst < cluster/40-dashboard-maas-rbac.yaml | oc apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rhods-dashboard-maas
+  labels:
+    app.kubernetes.io/part-of: models-as-a-service
+    opendatahub.io/managed: "false"
+  annotations:
+    # Not operator-managed. If a future RHOAI release ships its own
+    # dashboard -> maas-api grant, delete this binding rather than keeping both.
+    maas.local/purpose: "grant dashboard SA access to maas-api (403 on /v1/api-keys/search)"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${MAAS_DASHBOARD_ROLE}
+subjects:
+  - kind: ServiceAccount
+    name: ${DASHBOARD_SA_NAME}
+    namespace: ${APP_NS}

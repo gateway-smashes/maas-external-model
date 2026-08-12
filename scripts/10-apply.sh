@@ -31,6 +31,19 @@ if [[ -n "${PROVIDER_PORT:-}" && "$PROVIDER_PORT" != "443" && "$PROVIDER_PORT" !
 fi
 echo ">> provider host: $PROVIDER_HOST"
 
+# maas-ui authenticates to maas-api as the dashboard ServiceAccount, not as the
+# browser user. If that subject is missing from MaaSAuthPolicy the dashboard
+# gets an empty-bodied 403 while `oc whoami -t` works fine. Resolve it from the
+# live Deployment so a renamed SA still works.
+if [ -z "${DASHBOARD_SA:-}" ]; then
+  _dash_ns="${APP_NS:-redhat-ods-applications}"
+  _dash_sa="$(oc get deploy rhods-dashboard -n "$_dash_ns" \
+    -o jsonpath='{.spec.template.spec.serviceAccountName}' 2>/dev/null || true)"
+  DASHBOARD_SA="system:serviceaccount:${_dash_ns}:${_dash_sa:-rhods-dashboard}"
+fi
+export DASHBOARD_SA
+echo ">> dashboard identity: $DASHBOARD_SA"
+
 echo ">> namespace $MAAS_NS"
 oc create namespace "$MAAS_NS" --dry-run=client -o yaml | oc apply -f -
 oc label namespace "$MAAS_NS" opendatahub.io/dashboard=true --overwrite
