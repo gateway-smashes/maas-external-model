@@ -6,8 +6,21 @@ in the OpenShift AI dashboard and is usable from the Gen AI studio playground.
 Target: RHOAI 3.4.x self-managed. MaaS Gateway lives in a **dedicated namespace**
 (`GATEWAY_NS`, default `maas-gateway`) — not `openshift-ingress`.
 
-For full bring-up, playground fixes, and a checklist, see
-**[CONFIGURING_MAAS.md](./CONFIGURING_MAAS.md)** (§9).
+## Read before installing
+
+This install touches the platform gateway, Authorino policy and cluster RBAC.
+Skimming these two first will save you hours — most failure modes here surface
+**only in a server-side log**, never to the caller.
+
+| Doc | Read it for | Read when |
+|---|---|---|
+| **[UNDERSTANDING_OAI.md](./UNDERSTANDING_OAI.md)** | What RHOAI runs, which of the dashboard's 9 containers logs what, and why operator-owned objects revert your edits | Before touching anything |
+| **[UNDERSTANDING_MAAS.md](./UNDERSTANDING_MAAS.md)** | MaaS components, the full request hop chain, a failure catalogue keyed by error string, and known product gaps | Before installing, and whenever a request fails |
+| [CONFIGURING_MAAS.md](./CONFIGURING_MAAS.md) | Step-by-step bring-up and the manual reproduction checklist (§9) | While installing |
+
+Two facts worth knowing up front: an external model adds **zero pods** (it is
+routing metadata, not workload), and several MaaS objects are **operator-owned** —
+patch them and they revert on the next reconcile.
 
 ---
 
@@ -139,8 +152,12 @@ curl -sk "https://$GW_HOST/$MAAS_NS/$MODEL_NAME/v1/chat/completions" \
 
 ### 7. Playground
 
+Creates the LlamaStackDistribution, its Postgres backend and the model-discovery
+shim — no clicking through Gen AI studio required. See
+[UNDERSTANDING_MAAS.md §7](./UNDERSTANDING_MAAS.md) for why each piece exists.
+
 ```bash
-./cluster/lsd-playground-fix.sh
+./scripts/15-playground.sh
 ```
 
 ### 8. Troubleshoot
@@ -155,20 +172,36 @@ curl -sk "https://$GW_HOST/$MAAS_NS/$MODEL_NAME/v1/chat/completions" \
 ## Layout
 
 ```
+UNDERSTANDING_OAI.md               platform components + troubleshooting map
+UNDERSTANDING_MAAS.md              MaaS components, hop chain, failure catalogue
+CONFIGURING_MAAS.md                step-by-step bring-up (§9 = checklist)
 config.env.example                 GATEWAY_NS / GATEWAY_NAME / cert / allowed NS
-scripts/00-discover.sh
+
+scripts/00-discover.sh             blind-cluster diagnostic bundle (run first)
 scripts/05-gateway.sh              install | delete | reinstall | ipp | status
-scripts/10-apply.sh
+scripts/06-gateway-rename.sh       move the Gateway to another name/namespace
+scripts/07-tenant.sh               bind MaaS to a Gateway (Tenant.gatewayRef)
+scripts/10-apply.sh                render + apply native/ (or litellm)
+scripts/15-playground.sh           Postgres + shim + LlamaStackDistribution
 scripts/20-verify.sh
 scripts/90-troubleshoot.sh
-native/                            ExternalModel + access policy
-litellm-fallback/
+scripts/99-reinstall.sh            destructive rebuild, preserves the provider key
+
+native/                            ExternalModel + MaaSModelRef + access policy
+native/40-genai-dashboard-configmaps.yaml   ConfigMaps gen-ai-ui expects
+playground/                        LSD + its Postgres + model-discovery shim
+litellm-fallback/                  shim path when ExternalModel/IPP unavailable
+
 cluster/00-gateway-namespace.yaml
 cluster/10-maas-default-gateway.yaml
+cluster/20-maas-gateway-route.yaml
+cluster/30-maas-tenant.yaml        Tenant -> gatewayRef
+cluster/40-dashboard-maas-rbac.yaml  binds dashboard SA to maas-viewer-role
 cluster/ipp-envoyfilter-fix.yaml   rendered into GATEWAY_NS
-cluster/lsd-playground-fix.sh
-cluster/lsd-model-alias-bootstrap.yaml
-CONFIGURING_MAAS.md
+
+cluster/lsd-playground-fix.sh          DEPRECATED — writes a sqlite kvstore alias;
+cluster/lsd-model-alias-bootstrap.yaml DEPRECATED — does not apply to Postgres-backed
+                                       distributions. Use scripts/15-playground.sh.
 ```
 
 ---
